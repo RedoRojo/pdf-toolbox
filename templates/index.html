@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Toolbox — Herramienta de PDF</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-top">
+        <h1 class="title">PDF Toolbox</h1>
+        <span class="badge-tag">Entorno Local · Miniconda</span>
+      </div>
+      <p class="subtitle">Herramientas limpias y eficientes para optimizar y manipular documentos PDF.</p>
+    </header>
+
+    <!-- Local File Quick Access Banner -->
+    {% if local_files %}
+      {% for lf in local_files %}
+        {% if lf.is_test_file %}
+        <div class="local-banner" id="testFileBanner">
+          <div class="local-banner-info">
+            <svg class="icon-file" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+            </svg>
+            <div>
+              <strong>Archivo detectado:</strong> {{ lf.filename }} ({{ lf.size_formatted }})
+              <div style="font-size: 0.78rem; color: var(--text-muted);">Listo para pruebas directas en este directorio</div>
+            </div>
+          </div>
+          <button type="button" class="btn-sm" onclick="selectLocalFile('{{ lf.filename }}', '{{ lf.size_formatted }}')">
+            Usar este archivo
+          </button>
+        </div>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+
+    <!-- Tabs Navigation -->
+    <nav class="tabs" role="tablist">
+      <button type="button" class="tab-btn active" data-tab="compress" role="tab">Aligerar PDF</button>
+      <button type="button" class="tab-btn" data-tab="ocr" role="tab">Digitalizar / OCR</button>
+      <button type="button" class="tab-btn" data-tab="webpdf" role="tab">Web a PDF (Zotero)</button>
+      <button type="button" class="tab-btn" data-tab="split" role="tab">Dividir / Extraer</button>
+      <button type="button" class="tab-btn" data-tab="merge" role="tab">Unir PDFs</button>
+      <button type="button" class="tab-btn" data-tab="rotate" role="tab">Rotar</button>
+      <button type="button" class="tab-btn" data-tab="inspect" role="tab">Inspeccionar / Metadatos</button>
+    </nav>
+
+    <!-- Main Active Workspace Card -->
+    <main class="card">
+      
+      <!-- Shared Single-File Selector (Used by Compress, Split, Rotate, Inspect) -->
+      <div id="singleFileSection">
+        <input type="file" id="fileInput" accept=".pdf" class="hidden">
+        
+        <!-- Dropzone -->
+        <div class="dropzone" id="dropzone">
+          <svg class="dropzone-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+          </svg>
+          <div class="dropzone-text">Arrastra tu archivo PDF aquí o haz clic para explorar</div>
+          <div class="dropzone-hint">Formatos soportados: .pdf hasta cualquier tamaño</div>
+        </div>
+
+        <!-- Selected File Indicator -->
+        <div class="selected-file-indicator hidden" id="selectedFileBar">
+          <div>
+            <span class="file-name-text" id="selectedFileName">archivo.pdf</span>
+            <span class="file-meta-text" id="selectedFileSize">(0 MB)</span>
+          </div>
+          <button type="button" class="btn-clear" onclick="clearSelectedFile()" title="Cambiar archivo">&times;</button>
+        </div>
+      </div>
+
+      <!-- TAB 1: ALIGERAR / COMPRIMIR -->
+      <section id="tab-compress" class="tab-content">
+        <div class="form-group">
+          <label class="form-label">Nivel de compresión</label>
+          <div class="options-grid">
+            <div class="option-card selected" data-preset="screen" onclick="selectPreset(this)">
+              <div class="option-title">Máxima compresión</div>
+              <div class="option-desc">Ideal para móvil o enviar por correo/chat (~72 dpi).</div>
+            </div>
+            <div class="option-card" data-preset="ebook" onclick="selectPreset(this)">
+              <div class="option-title">Equilibrada</div>
+              <div class="option-desc">Balance perfecto entre legibilidad y ahorro de peso (~150 dpi).</div>
+            </div>
+            <div class="option-card" data-preset="printer" onclick="selectPreset(this)">
+              <div class="option-title">Alta calidad</div>
+              <div class="option-desc">Optimización ligera preservando resolución para impresión (~300 dpi).</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="chkGrayscale">
+            <span>Convertir a escala de grises (ahorro adicional drástico para libros escaneados)</span>
+          </label>
+        </div>
+
+        <div class="action-footer">
+          <button type="button" class="btn-primary" id="btnCompress" onclick="handleCompress()">
+            Aligerar documento
+          </button>
+        </div>
+      </section>
+
+      <!-- TAB OCR: DIGITALIZAR LIBRO / DOCUMENTO -->
+      <section id="tab-ocr" class="tab-content hidden">
+        <p class="subtitle" style="margin-bottom: 1.25rem;">
+          Convierte fotos de páginas, escaneos o PDFs de solo imagen en un <strong>PDF con texto 100% seleccionable, buscable y copiable</strong>.
+        </p>
+
+        <!-- Dropzone múltiple para OCR -->
+        <input type="file" id="ocrFileInput" accept="image/*,.pdf" multiple class="hidden">
+        <div class="dropzone" id="ocrDropzone">
+          <svg class="dropzone-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+          <div class="dropzone-text">Arrastra fotos de páginas (JPG, PNG, WEBP) o un archivo PDF escaneado</div>
+          <div class="dropzone-hint">Puedes seleccionar varias imágenes a la vez. Se ordenarán automáticamente por numeración de página.</div>
+        </div>
+
+        <!-- Galería de miniaturas y contador de páginas -->
+        <div id="ocrPreviewSection" class="hidden">
+          <div class="ocr-summary-bar">
+            <span id="ocrPageCountText">0 páginas listas para procesar</span>
+            <button type="button" class="btn-clear" onclick="clearOcrFiles()" style="font-size: 0.8rem; color: var(--text-muted); cursor: pointer; background: none; border: none;">
+              &times; Quitar todas
+            </button>
+          </div>
+          <div id="ocrPreviewGrid" class="ocr-preview-grid"></div>
+        </div>
+
+        <!-- Configuración de Idioma OCR -->
+        <div class="form-group" style="margin-top: 1.25rem;">
+          <label class="form-label">Idioma del texto en el libro / documento</label>
+          <div class="options-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+            <div class="option-card selected" data-ocrlang="spa" onclick="selectOcrLang(this)">
+              <div class="option-title">Español (Recomendado)</div>
+              <div class="option-desc">Optimizado para acentos, tildes y caracteres en español.</div>
+            </div>
+            <div class="option-card" data-ocrlang="spa+eng" onclick="selectOcrLang(this)">
+              <div class="option-title">Español + Inglés</div>
+              <div class="option-desc">Ideal para textos bilingües, citas o vocabulario mixto.</div>
+            </div>
+            <div class="option-card" data-ocrlang="eng" onclick="selectOcrLang(this)">
+              <div class="option-title">Inglés</div>
+              <div class="option-desc">Optimizado para documentos redactados en inglés.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Título Opcional del Libro -->
+        <div class="form-group">
+          <label class="form-label" for="ocrTitleInput">Título del libro o documento (Opcional)</label>
+          <input type="text" id="ocrTitleInput" class="input-text" placeholder="Ej: Tratado de Derecho Constitucional">
+        </div>
+
+        <!-- Opciones de Mejora para Escaneos -->
+        <div class="form-group">
+          <label class="checkbox-label" style="margin-bottom: 0.5rem;">
+            <input type="checkbox" id="chkOcrEnhance" checked>
+            <span>Optimizar contraste y limpiar sombras de página (recomendado para fotos de móvil o libros físicos)</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="chkOcrAutoOrient" checked>
+            <span>Detección automática de orientación (auto-rotar páginas si están horizontales o invertidas)</span>
+          </label>
+        </div>
+
+        <div class="action-footer">
+          <button type="button" class="btn-primary" id="btnRunOcr" onclick="handleOcrScan()" disabled>
+            Digitalizar y Aplicar OCR
+          </button>
+        </div>
+      </section>
+
+      <!-- TAB 2: DIVIDIR / EXTRAER -->
+      <section id="tab-split" class="tab-content hidden">
+        <div class="form-group">
+          <label class="form-label" for="pageRanges">Páginas o rangos a extraer</label>
+          <input type="text" id="pageRanges" class="input-text" placeholder="Ejemplo: 1-5, 8, 12-20">
+          <div class="form-hint">Indica páginas individuales o rangos separados por comas.</div>
+        </div>
+        <div class="action-footer">
+          <button type="button" class="btn-primary" onclick="handleSplit()">
+            Extraer páginas
+          </button>
+        </div>
+      </section>
+
+      <!-- TAB 3: UNIR MULTIPLES PDFS -->
+      <section id="tab-merge" class="tab-content hidden">
+        <input type="file" id="mergeFileInput" accept=".pdf" multiple class="hidden">
+        <div class="dropzone" id="mergeDropzone">
+          <svg class="dropzone-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 4v16m8-8H4"/>
+          </svg>
+          <div class="dropzone-text">Selecciona o arrastra 2 o más archivos PDF para unirlos</div>
+        </div>
+        <div id="mergeFileList" class="form-group"></div>
+        <div class="action-footer">
+          <button type="button" class="btn-primary" id="btnMerge" onclick="handleMerge()" disabled>
+            Unir PDFs
+          </button>
+        </div>
+      </section>
+
+      <!-- TAB 4: ROTAR -->
+      <section id="tab-rotate" class="tab-content hidden">
+        <div class="form-group">
+          <label class="form-label">Ángulo de rotación</label>
+          <div class="options-grid">
+            <div class="option-card selected" data-angle="90" onclick="selectAngle(this)">
+              <div class="option-title">90° Horario</div>
+              <div class="option-desc">Gira 90 grados a la derecha.</div>
+            </div>
+            <div class="option-card" data-angle="180" onclick="selectAngle(this)">
+              <div class="option-title">180° Invertido</div>
+              <div class="option-desc">Invierte la orientación completa.</div>
+            </div>
+            <div class="option-card" data-angle="270" onclick="selectAngle(this)">
+              <div class="option-title">90° Antihorario</div>
+              <div class="option-desc">Gira 90 grados a la izquierda (270°).</div>
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="rotateRanges">Páginas específicas (Opcional)</label>
+          <input type="text" id="rotateRanges" class="input-text" placeholder="Dejar vacío para rotar todas las páginas, o indicar ej: 1-10">
+        </div>
+        <div class="action-footer">
+          <button type="button" class="btn-primary" onclick="handleRotate()">
+            Rotar documento
+          </button>
+        </div>
+      </section>
+
+      <!-- TAB 5: INSPECCIONAR -->
+      <section id="tab-inspect" class="tab-content hidden">
+        <p class="subtitle" style="margin-bottom: 1rem;">Obtén información técnica, páginas y metadatos del documento.</p>
+        <div class="action-footer" style="margin-top: 0;">
+          <button type="button" class="btn-primary" onclick="handleInspect()">
+            Analizar documento
+          </button>
+        </div>
+        <div id="inspectResultContainer"></div>
+      </section>
+
+      <!-- TAB 6: WEB A PDF (ZOTERO) -->
+      <section id="tab-webpdf" class="tab-content hidden">
+        <p class="subtitle" style="margin-bottom: 1.25rem;">
+          Convierte artículos y blogs a PDFs limpios con texto seleccionable, formateados para leer y remarcar en Zotero.
+        </p>
+
+        <div class="form-group">
+          <label class="form-label" for="webUrlInput">URL del artículo o blog</label>
+          <div style="display: flex; gap: 0.5rem;">
+            <input type="url" id="webUrlInput" class="input-text" placeholder="https://marxist.com/marxismo-versus-posmodernismo-jugando-al-escondite-con-la-verdad.htm" onchange="autoDetectUrlMetadata()">
+            <button type="button" class="btn-sm" id="btnDetectMeta" onclick="detectUrlMetadata()" style="font-size: 0.8rem; padding: 0.5rem 0.85rem;" title="Detectar metadatos automáticamente">
+              Detectar
+            </button>
+          </div>
+          <div style="margin-top: 0.45rem; font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 0.85rem; flex-wrap: wrap;">
+            <span>Probar ejemplos:</span>
+            <a href="javascript:void(0)" onclick="setSampleUrl('https://www.marxists.org/espanol/lora/1984/mar00.htm')" style="color: var(--accent-blue); text-decoration: underline;">
+              G. Lora (Marxists.org)
+            </a>
+            <a href="javascript:void(0)" onclick="setSampleUrl('https://marxist.com/marxismo-versus-posmodernismo-jugando-al-escondite-con-la-verdad.htm?hl=es-ES')" style="color: var(--accent-blue); text-decoration: underline;">
+              Marxismo vs Posmodernismo
+            </a>
+            <a href="javascript:void(0)" onclick="setSampleUrl('https://marxist.com/el-marxismo-y-la-religion.htm')" style="color: var(--accent-blue); text-decoration: underline;">
+              El Marxismo y la Religión
+            </a>
+          </div>
+        </div>
+
+        <!-- Metadatos Editables para Zotero -->
+        <div class="form-group" style="background-color: var(--bg-subtle); padding: 0.95rem 1.1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem;">
+            <span style="font-size: 0.85rem; font-weight: 700; color: var(--text-main);">Metadatos para Zotero (Editables)</span>
+            <span style="font-size: 0.75rem; color: var(--text-muted);">Puedes corregir el autor o título antes de generar</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0.75rem; margin-bottom: 0.6rem;">
+            <div>
+              <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Autor (detectado / editable)</label>
+              <input type="text" id="webAuthorInput" class="input-text" placeholder="Ej: Alan Woods">
+            </div>
+            <div>
+              <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Fecha de publicación</label>
+              <input type="text" id="webDateInput" class="input-text" placeholder="Ej: 2022-02-03">
+            </div>
+          </div>
+          <div>
+            <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Título del documento</label>
+            <input type="text" id="webTitleInput" class="input-text" placeholder="Dejar vacío para usar el título detectado">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Estructura del archivo en Zotero</label>
+          <div class="options-grid">
+            <div class="option-card selected" data-zoteromode="standalone" onclick="selectZoteroMode(this)">
+              <div class="option-title">Archivo PDF Directo (Recomendado)</div>
+              <div class="option-desc">Aparece como un único archivo PDF en la lista de Zotero con su título legible, sin crear carpetas contenedor ni subarchivos llamados 'PDF'.</div>
+            </div>
+            <div class="option-card" data-zoteromode="parent" onclick="selectZoteroMode(this)">
+              <div class="option-title">Ficha Bibliográfica (Parent Item)</div>
+              <div class="option-desc">Incrusta metadatos para que Zotero cree una ficha de artículo de revista con el archivo PDF anidado en su interior.</div>
+            </div>
+          </div>
+          <div style="margin-top: 0.65rem; font-size: 0.78rem; color: var(--text-secondary); background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 0.65rem 0.85rem; line-height: 1.45;">
+            <strong>💡 Tip para Zotero:</strong> Con <em>Archivo PDF Directo</em> el documento queda limpio para abrir y subrayar con doble clic. Además, en Zotero puedes ir a <code>Editar → Preferencias → General</code> y desmarcar <em>«Recuperar metadatos de archivos PDF automáticamente»</em> si deseas que todos tus PDFs se importen siempre como archivos directos.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Modo de conversión</label>
+          <div class="options-grid">
+            <div class="option-card selected" data-webmode="reader" onclick="selectWebMode(this)">
+              <div class="option-title">Artículo Limpio (Recomendado para Zotero)</div>
+              <div class="option-desc">Extrae título, autor, fecha y cuerpo. Elimina publicidad, cookies y menús. Formato libro/ensayo para subrayar.</div>
+            </div>
+            <div class="option-card" data-webmode="fullpage" onclick="selectWebMode(this)">
+              <div class="option-title">Página Completa (Snapshot Web)</div>
+              <div class="option-desc">Captura la página completa preservando los estilos CSS y diseño original.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group" id="readerOptions">
+          <label class="form-label">Estilo tipográfico editorial</label>
+          <div class="options-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin-bottom: 0.75rem;">
+            <div class="option-card selected" data-webstyle="academic" onclick="selectWebStyle(this)">
+              <div class="option-title">Académico (Serif)</div>
+              <div class="option-desc">Tipografía clásica y descansada tipo libro o ensayo.</div>
+            </div>
+            <div class="option-card" data-webstyle="sans" onclick="selectWebStyle(this)">
+              <div class="option-title">Moderno (Sans)</div>
+              <div class="option-desc">Tipografía moderna limpia y directa, ideal para blogs técnicos.</div>
+            </div>
+          </div>
+
+          <label class="checkbox-label">
+            <input type="checkbox" id="chkWebImages" checked>
+            <span>Incluir imágenes e ilustraciones del artículo</span>
+          </label>
+        </div>
+
+        <div class="action-footer">
+          <button type="button" class="btn-primary" id="btnWebToPdf" onclick="handleWebToPdf()">
+            Convertir a PDF para Zotero
+          </button>
+        </div>
+      </section>
+
+      <!-- Shared Progress Indicator -->
+      <div id="progressSection" class="progress-card hidden">
+        <div class="progress-header">
+          <span id="progressTitle">Procesando...</span>
+          <span id="progressPercentage">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="progressBarFill" class="progress-bar-fill"></div>
+        </div>
+        <div id="progressStatusMsg" class="progress-msg">Iniciando tarea...</div>
+      </div>
+
+      <!-- Shared Result View -->
+      <div id="resultSection" class="result-card hidden">
+        <div class="result-title">
+          <svg style="width: 20px; height: 20px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+          </svg>
+          <span id="resultHeading">Operación completada con éxito</span>
+        </div>
+
+        <div class="metrics-grid" id="metricsGrid">
+          <div>
+            <div class="metric-label">Tamaño Original</div>
+            <div class="metric-value" id="resOrigSize">-</div>
+          </div>
+          <div>
+            <div class="metric-label">Tamaño Final</div>
+            <div class="metric-value" id="resCompSize">-</div>
+          </div>
+          <div>
+            <div class="metric-label">Espacio Ahorrado</div>
+            <div class="metric-value saved" id="resSaved">-</div>
+          </div>
+          <div>
+            <div class="metric-label">Tiempo</div>
+            <div class="metric-value" id="resDuration">-</div>
+          </div>
+        </div>
+
+        <a href="#" id="btnDownloadLink" class="btn-download">
+          Descargar documento
+        </a>
+
+        <!-- Acciones adicionales para OCR -->
+        <div id="ocrExtraActions" class="ocr-results-actions hidden">
+          <a href="#" id="btnDownloadTxt" class="ocr-btn-secondary" download>
+            <svg style="width: 16px; height: 16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            Descargar Texto (.txt)
+          </a>
+          <button type="button" id="btnCopyOcrText" class="ocr-btn-secondary" onclick="copyOcrText()">
+            <svg style="width: 16px; height: 16px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"/>
+            </svg>
+            Copiar Texto Extraído
+          </button>
+        </div>
+
+        <!-- Caja de previsualización de texto OCR -->
+        <div id="ocrTextPreviewBox" class="ocr-text-preview-box hidden">
+          <div class="ocr-text-preview-header">
+            <span>Texto Reconocido por OCR (Seleccionable en el PDF)</span>
+            <span style="font-size: 0.72rem; color: var(--text-muted);">Puedes copiar o seleccionar partes directamente</span>
+          </div>
+          <div id="ocrTextPreviewContent" class="ocr-text-preview-content"></div>
+        </div>
+      </div>
+
+      <!-- Error box -->
+      <div id="errorBox" class="error-msg hidden"></div>
+
+    </main>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
