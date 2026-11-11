@@ -7,8 +7,8 @@ cd "$DIR"
 CONDA_ENV_PY="/home/redo/miniconda3/envs/pdf-toolkit/bin/python"
 
 if [ ! -f "$CONDA_ENV_PY" ]; then
-    echo "El entorno conda pdf-toolkit no fue encontrado en $CONDA_ENV_PY"
-    echo "Intentando activar via conda..."
+    echo "Conda environment 'pdf-toolkit' not found at $CONDA_ENV_PY"
+    echo "Attempting to activate via conda..."
     eval "$(/home/redo/miniconda3/bin/conda shell.bash hook)"
     conda activate pdf-toolkit
     PYTHON_CMD="python"
@@ -22,13 +22,13 @@ is_port_in_use() {
 
 PORT="${PORT:-8000}"
 while is_port_in_use "$PORT"; do
-    echo "Puerto $PORT ocupado, probando siguiente..."
+    echo "Port $PORT is in use, trying next..."
     PORT=$((PORT+1))
 done
 
 echo "=========================================================="
-echo " PDF Toolbox iniciado exitosamente con Miniconda"
-echo " Interfaz Web: http://127.0.0.1:$PORT"
+echo " PDF Toolbox started successfully with Miniconda"
+echo " Web Interface: http://127.0.0.1:$PORT"
 echo "=========================================================="
 
 "$PYTHON_CMD" -m uvicorn app:app --host 127.0.0.1 --port "$PORT"

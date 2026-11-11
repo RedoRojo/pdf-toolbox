@@ -6,7 +6,7 @@ __pycache__/
 venv/
 env/
 
-# Archivos subidos y procesados
+# Uploaded and processed files
 uploads/
 processed/
 *.pdf
