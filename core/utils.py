@@ -1,7 +1,10 @@
-import os
-import uuid
+"""
+Shared filesystem paths, filename sanitization, and cleanup helpers for PDF Toolbox.
+"""
+
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -10,13 +13,13 @@ ROOT_DIR = BASE_DIR.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 PROCESSED_DIR = BASE_DIR / "processed"
 
-# Asegurar directorios
+# Ensure working directories exist
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def format_bytes(size_bytes: int) -> str:
-    """Convierte bytes a formato legible (KB, MB, GB)."""
+    """Converts a byte count into a human-readable string (B, KB, MB, GB)."""
     if size_bytes <= 0:
         return "0 B"
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -29,11 +32,11 @@ def format_bytes(size_bytes: int) -> str:
 
 
 def get_unique_filename(original_name: str, prefix: str = "") -> str:
-    """Genera un nombre de archivo seguro preservando la extensión original."""
+    """Generates a safe unique filename preserving the original extension."""
     ext = Path(original_name).suffix or ".pdf"
     clean_stem = "".join(c for c in Path(original_name).stem if c.isalnum() or c in ("-", "_"))[:35]
     if not clean_stem:
-        clean_stem = "documento"
+        clean_stem = "document"
     token = uuid.uuid4().hex[:8]
     if prefix:
         return f"{prefix}_{clean_stem}_{token}{ext}"
@@ -41,7 +44,7 @@ def get_unique_filename(original_name: str, prefix: str = "") -> str:
 
 
 def find_local_parent_pdfs() -> List[Dict[str, Any]]:
-    """Encuentra archivos PDF disponibles en el directorio superior de la herramienta."""
+    """Finds PDF files located in the parent workspace directory."""
     files = []
     try:
         for p in ROOT_DIR.glob("*.pdf"):
@@ -52,23 +55,42 @@ def find_local_parent_pdfs() -> List[Dict[str, Any]]:
                     "filepath": str(p.resolve()),
                     "size_bytes": stat.st_size,
                     "size_formatted": format_bytes(stat.st_size),
-                    "is_test_file": p.name == "tomo25.pdf"
+                    "mtime": stat.st_mtime,
                 })
-    except Exception as e:
+    except OSError:
         pass
-    # Ordenar poniendo archivos de prueba o más recientes primero
-    files.sort(key=lambda x: (not x["is_test_file"], -x["size_bytes"]))
+    # Sort most recently modified / largest files first
+    files.sort(key=lambda x: (-x["mtime"], -x["size_bytes"]))
     return files
 
 
-def cleanup_old_files(max_age_hours: int = 6):
-    """Limpia archivos temporales antiguos."""
+def cleanup_old_files(max_age_hours: int = 6) -> None:
+    """Removes expired temporary uploads, working directories, and processed files."""
     now = time.time()
-    for directory in [UPLOAD_DIR, PROCESSED_DIR]:
-        for item in directory.glob("*"):
-            if item.is_file():
+    cutoff = max_age_hours * 3600
+    for directory in (UPLOAD_DIR, PROCESSED_DIR):
+        try:
+            for item in directory.iterdir():
                 try:
-                    if now - item.stat().st_mtime > max_age_hours * 3600:
-                        item.unlink(missing_ok=True)
-                except Exception:
+                    if now - item.stat().st_mtime > cutoff:
+                        if item.is_file():
+                            item.unlink(missing_ok=True)
+                        elif item.is_dir():
+                            shutil.rmtree(item, ignore_errors=True)
+                except OSError:
                     pass
+        except OSError:
+            pass
+
+
+def cleanup_old_tasks(task_store: Dict[str, Dict[str, Any]], max_age_hours: int = 6) -> None:
+    """Prunes finished in-memory background task records older than max_age_hours."""
+    now = time.time()
+    cutoff = max_age_hours * 3600
+    expired_ids = [
+        tid for tid, info in list(task_store.items())
+        if info.get("status") in ("completed", "failed")
+        and (now - float(info.get("created_at", now))) > cutoff
+    ]
+    for tid in expired_ids:
+        task_store.pop(tid, None)

@@ -1,13 +1,18 @@
-import re
+"""
+Core PDF manipulation operations: merge, split, rotate, inspect, and metadata editing.
+"""
+
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
 import pymupdf
+
 from .utils import format_bytes, get_unique_filename, PROCESSED_DIR
 
 
 def parse_page_ranges(range_str: str, max_pages: int) -> List[int]:
     """
-    Parsea una cadena de rangos como '1-5, 8, 10-12' a una lista de índices 0-indexed.
+    Parses a page range string such as '1-5, 8, 10-12' into a sorted list of 0-based page indices.
     """
     pages = set()
     parts = [p.strip() for p in range_str.split(",") if p.strip()]
@@ -18,10 +23,16 @@ def parse_page_ranges(range_str: str, max_pages: int) -> List[int]:
         if "-" in part:
             sub = part.split("-", 1)
             try:
-                start = max(1, int(sub[0].strip()))
-                end = min(max_pages, int(sub[1].strip()))
-                if start <= end:
-                    for p in range(start, end + 1):
+                start = int(sub[0].strip())
+                end = int(sub[1].strip())
+                if start < 1 and end < 1:
+                    continue
+                if start > max_pages and end > max_pages:
+                    continue
+                clamped_start = max(1, start)
+                clamped_end = min(max_pages, end)
+                if clamped_start <= clamped_end:
+                    for p in range(clamped_start, clamped_end + 1):
                         pages.add(p - 1)
             except ValueError:
                 continue
@@ -33,35 +44,41 @@ def parse_page_ranges(range_str: str, max_pages: int) -> List[int]:
             except ValueError:
                 continue
 
-    return sorted(list(pages))
+    return sorted(pages)
 
 
 def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> Dict[str, Any]:
-    """Une múltiples archivos PDF en un solo documento."""
+    """Merges multiple PDF files into a single document in sequence."""
     if not file_paths:
-        raise ValueError("No se proporcionaron archivos para unir.")
+        raise ValueError("No files provided to merge.")
 
     merged_doc = pymupdf.open()
     total_source_pages = 0
 
-    for path in file_paths:
-        p = Path(path)
-        if not p.is_file():
-            continue
-        sub_doc = pymupdf.open(str(p))
-        merged_doc.insert_pdf(sub_doc)
-        total_source_pages += len(sub_doc)
-        sub_doc.close()
+    try:
+        for path in file_paths:
+            p = Path(path)
+            if not p.is_file():
+                continue
+            sub_doc = pymupdf.open(str(p))
+            try:
+                if sub_doc.needs_pass:
+                    raise ValueError(f"File '{p.name}' is password-protected and cannot be merged.")
+                merged_doc.insert_pdf(sub_doc)
+                total_source_pages += len(sub_doc)
+            finally:
+                sub_doc.close()
 
-    if len(merged_doc) == 0:
-        raise ValueError("No se pudieron cargar páginas válidas de los archivos.")
+        if len(merged_doc) == 0:
+            raise ValueError("Could not load valid pages from the provided files.")
 
-    if not output_filename:
-        output_filename = get_unique_filename("unido.pdf", prefix="merged")
+        if not output_filename:
+            output_filename = get_unique_filename("merged.pdf", prefix="merged")
 
-    out_path = PROCESSED_DIR / output_filename
-    merged_doc.save(str(out_path), garbage=4, deflate=True, clean=True)
-    merged_doc.close()
+        out_path = PROCESSED_DIR / output_filename
+        merged_doc.save(str(out_path), garbage=4, deflate=True, clean=True)
+    finally:
+        merged_doc.close()
 
     size_bytes = out_path.stat().st_size
     return {
@@ -75,30 +92,36 @@ def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> 
 
 
 def split_pdf(input_path: str, page_ranges: str, output_filename: Optional[str] = None) -> Dict[str, Any]:
-    """Extrae las páginas seleccionadas de un PDF."""
+    """Extracts selected pages from a PDF document."""
     p = Path(input_path)
     if not p.is_file():
-        raise FileNotFoundError("Archivo PDF no encontrado.")
+        raise FileNotFoundError("PDF file not found.")
 
     src_doc = pymupdf.open(str(p))
-    total_pages = len(src_doc)
-    selected_indices = parse_page_ranges(page_ranges, total_pages)
+    try:
+        if src_doc.needs_pass:
+            raise ValueError("This PDF is password-protected and cannot be split.")
 
-    if not selected_indices:
+        total_pages = len(src_doc)
+        selected_indices = parse_page_ranges(page_ranges, total_pages)
+
+        if not selected_indices:
+            raise ValueError(f"No valid pages selected within range 1-{total_pages}.")
+
+        new_doc = pymupdf.open()
+        try:
+            for idx in selected_indices:
+                new_doc.insert_pdf(src_doc, from_page=idx, to_page=idx)
+
+            if not output_filename:
+                output_filename = get_unique_filename(p.name, prefix="split")
+
+            out_path = PROCESSED_DIR / output_filename
+            new_doc.save(str(out_path), garbage=4, deflate=True, clean=True)
+        finally:
+            new_doc.close()
+    finally:
         src_doc.close()
-        raise ValueError(f"No se seleccionaron páginas válidas dentro del rango 1-{total_pages}.")
-
-    new_doc = pymupdf.open()
-    for idx in selected_indices:
-        new_doc.insert_pdf(src_doc, from_page=idx, to_page=idx)
-
-    if not output_filename:
-        output_filename = get_unique_filename(p.name, prefix="dividido")
-
-    out_path = PROCESSED_DIR / output_filename
-    new_doc.save(str(out_path), garbage=4, deflate=True, clean=True)
-    new_doc.close()
-    src_doc.close()
 
     size_bytes = out_path.stat().st_size
     return {
@@ -112,29 +135,44 @@ def split_pdf(input_path: str, page_ranges: str, output_filename: Optional[str] 
     }
 
 
-def rotate_pdf(input_path: str, angle: int, page_ranges: Optional[str] = None, output_filename: Optional[str] = None) -> Dict[str, Any]:
-    """Rota páginas del PDF en múltiplos de 90 grados (90, 180, 270)."""
+def rotate_pdf(
+    input_path: str,
+    angle: int,
+    page_ranges: Optional[str] = None,
+    output_filename: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rotates PDF pages by multiples of 90 degrees (90, 180, or 270)."""
     if angle not in (90, 180, 270):
-        raise ValueError("El ángulo de rotación debe ser 90, 180 o 270 grados.")
+        raise ValueError("Rotation angle must be 90, 180, or 270 degrees.")
 
     p = Path(input_path)
     if not p.is_file():
-        raise FileNotFoundError("Archivo PDF no encontrado.")
+        raise FileNotFoundError("PDF file not found.")
 
     doc = pymupdf.open(str(p))
-    total_pages = len(doc)
-    indices = parse_page_ranges(page_ranges, total_pages) if page_ranges else list(range(total_pages))
+    try:
+        if doc.needs_pass:
+            raise ValueError("This PDF is password-protected and cannot be rotated.")
 
-    for idx in indices:
-        page = doc[idx]
-        page.set_rotation((page.rotation + angle) % 360)
+        total_pages = len(doc)
+        if page_ranges and page_ranges.strip():
+            indices = parse_page_ranges(page_ranges, total_pages)
+            if not indices:
+                raise ValueError(f"No valid pages selected within range 1-{total_pages}.")
+        else:
+            indices = list(range(total_pages))
 
-    if not output_filename:
-        output_filename = get_unique_filename(p.name, prefix=f"rotado_{angle}")
+        for idx in indices:
+            page = doc[idx]
+            page.set_rotation((page.rotation + angle) % 360)
 
-    out_path = PROCESSED_DIR / output_filename
-    doc.save(str(out_path), garbage=4, deflate=True)
-    doc.close()
+        if not output_filename:
+            output_filename = get_unique_filename(p.name, prefix=f"rotated_{angle}")
+
+        out_path = PROCESSED_DIR / output_filename
+        doc.save(str(out_path), garbage=4, deflate=True)
+    finally:
+        doc.close()
 
     size_bytes = out_path.stat().st_size
     return {
@@ -149,35 +187,33 @@ def rotate_pdf(input_path: str, angle: int, page_ranges: Optional[str] = None, o
 
 
 def inspect_pdf(input_path: str) -> Dict[str, Any]:
-    """Obtiene metadatos detallados y resumen de estructura de un PDF."""
+    """Retrieves detailed metadata, dimensions, and structure summary for a PDF."""
     p = Path(input_path)
     if not p.is_file():
-        raise FileNotFoundError("Archivo PDF no encontrado.")
+        raise FileNotFoundError("PDF file not found.")
 
-    doc = pymupdf.open(str(p))
-    total_pages = len(doc)
     stat = p.stat()
+    doc = pymupdf.open(str(p))
+    try:
+        total_pages = len(doc)
+        is_encrypted = bool(doc.is_encrypted)
+        meta = doc.metadata or {}
 
-    # Dimensiones de la primera página
-    dim_str = "N/A"
-    first_page_w_pt, first_page_h_pt = 0, 0
-    if total_pages > 0:
-        rect = doc[0].rect
-        first_page_w_pt = round(rect.width, 2)
-        first_page_h_pt = round(rect.height, 2)
-        # Convertir a mm (1 pt = 25.4 / 72 mm)
-        w_mm = round(first_page_w_pt * 25.4 / 72, 1)
-        h_mm = round(first_page_h_pt * 25.4 / 72, 1)
-        dim_str = f"{w_mm} × {h_mm} mm ({first_page_w_pt} × {first_page_h_pt} pt)"
+        dim_str = "N/A"
+        if total_pages > 0 and not doc.needs_pass:
+            rect = doc[0].rect
+            first_page_w_pt = round(rect.width, 2)
+            first_page_h_pt = round(rect.height, 2)
+            w_mm = round(first_page_w_pt * 25.4 / 72, 1)
+            h_mm = round(first_page_h_pt * 25.4 / 72, 1)
+            dim_str = f"{w_mm} × {h_mm} mm ({first_page_w_pt} × {first_page_h_pt} pt)"
 
-    # Muestra de imágenes (contar hasta primeras 20 páginas para rapidez)
-    sample_images = 0
-    pages_to_sample = min(20, total_pages)
-    for i in range(pages_to_sample):
-        sample_images += len(doc[i].get_images())
-
-    meta = doc.metadata or {}
-    doc.close()
+        sample_images = 0
+        pages_to_sample = min(20, total_pages) if not doc.needs_pass else 0
+        for i in range(pages_to_sample):
+            sample_images += len(doc[i].get_images())
+    finally:
+        doc.close()
 
     return {
         "success": True,
@@ -187,16 +223,16 @@ def inspect_pdf(input_path: str) -> Dict[str, Any]:
         "pages": total_pages,
         "dimensions": dim_str,
         "metadata": {
-            "title": meta.get("title") or "Sin título",
-            "author": meta.get("author") or "No especificado",
+            "title": meta.get("title") or "Untitled",
+            "author": meta.get("author") or "Not specified",
             "subject": meta.get("subject") or "",
             "keywords": meta.get("keywords") or "",
-            "creator": meta.get("creator") or "No especificado",
-            "producer": meta.get("producer") or "No especificado",
-            "creation_date": meta.get("creationDate") or "No especificada",
-            "mod_date": meta.get("modDate") or "No especificada",
+            "creator": meta.get("creator") or "Not specified",
+            "producer": meta.get("producer") or "Not specified",
+            "creation_date": meta.get("creationDate") or "Not specified",
+            "mod_date": meta.get("modDate") or "Not specified",
         },
-        "is_encrypted": doc.is_encrypted if hasattr(doc, "is_encrypted") else False,
+        "is_encrypted": is_encrypted,
         "sample_images_first_pages": sample_images,
         "sample_pages_checked": pages_to_sample,
     }
@@ -208,33 +244,38 @@ def update_pdf_metadata(
     author: Optional[str] = None,
     subject: Optional[str] = None,
     keywords: Optional[str] = None,
-    output_filename: Optional[str] = None
+    output_filename: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Actualiza los metadatos internos de cualquier archivo PDF."""
+    """Updates internal PDF metadata fields cleanly."""
     p = Path(input_path)
     if not p.is_file():
-        raise FileNotFoundError("Archivo PDF no encontrado.")
+        raise FileNotFoundError("PDF file not found.")
 
     doc = pymupdf.open(str(p))
-    meta = doc.metadata or {}
+    try:
+        if doc.needs_pass:
+            raise ValueError("This PDF is password-protected and cannot be modified.")
 
-    if title is not None:
-        meta["title"] = title.strip()
-    if author is not None:
-        meta["author"] = author.strip()
-    if subject is not None:
-        meta["subject"] = subject.strip()
-    if keywords is not None:
-        meta["keywords"] = keywords.strip()
+        meta = doc.metadata or {}
 
-    doc.set_metadata(meta)
+        if title is not None:
+            meta["title"] = title.strip()
+        if author is not None:
+            meta["author"] = author.strip()
+        if subject is not None:
+            meta["subject"] = subject.strip()
+        if keywords is not None:
+            meta["keywords"] = keywords.strip()
 
-    if not output_filename:
-        output_filename = get_unique_filename(p.name, prefix="meta_editado")
+        doc.set_metadata(meta)
 
-    out_path = PROCESSED_DIR / output_filename
-    doc.save(str(out_path), garbage=4, deflate=True)
-    doc.close()
+        if not output_filename:
+            output_filename = get_unique_filename(p.name, prefix="meta_edited")
+
+        out_path = PROCESSED_DIR / output_filename
+        doc.save(str(out_path), garbage=4, deflate=True)
+    finally:
+        doc.close()
 
     size_bytes = out_path.stat().st_size
     return {
@@ -248,4 +289,3 @@ def update_pdf_metadata(
         "size_bytes": size_bytes,
         "size_formatted": format_bytes(size_bytes),
     }
-
