@@ -1,0 +1,10 @@
+{
+  "id": "pdf-toolbox",
+  "name": "PDF Toolbox",
+  "description": "Fast local toolkit for scanned book OCR, PDF compression, merge, split, rotate, metadata editing, and web-to-PDF conversion.",
+  "category": "Documents",
+  "icon": "pdf",
+  "command": "./run.sh",
+  "port": 8002,
+  "health_path": "/"
+}
