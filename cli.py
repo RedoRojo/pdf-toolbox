@@ -19,6 +19,7 @@ Examples:
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -275,7 +276,7 @@ def cmd_web(args) -> int:
             # Move from PROCESSED_DIR into cwd without overwriting
             src = Path(res["filepath"])
             dest = resolve_output(None, clean_filename_from_title(res["title"], res.get("author")))
-            src.replace(dest)
+            shutil.move(str(src), str(dest))
             res["filepath"] = str(dest)
             res["filename"] = dest.name
     except Exception as e:
