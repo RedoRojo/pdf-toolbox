@@ -2,62 +2,107 @@
 
 let currentFile = null;
 let currentLocalFilename = null;
-let currentLocalFileSize = null;
-let selectedPreset = "screen";
-let selectedAngle = 90;
 let mergeFiles = [];
+let ocrFiles = [];
+let ocrObjectUrls = [];
+let lastExtractedOcrText = "";
 let pollInterval = null;
+let ocrPollInterval = null;
+let copyFeedbackTimer = null;
+let lastCopyStatusMessage = "";
 
-// DOM Elements
+// Core DOM Elements
 const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("fileInput");
 const selectedFileBar = document.getElementById("selectedFileBar");
 const selectedFileName = document.getElementById("selectedFileName");
 const selectedFileSize = document.getElementById("selectedFileSize");
 const progressSection = document.getElementById("progressSection");
-const progressBarFill = document.getElementById("progressBarFill");
+const progressBar = document.getElementById("progressBar");
+const progressTitle = document.getElementById("progressTitle");
 const progressPercentage = document.getElementById("progressPercentage");
 const progressStatusMsg = document.getElementById("progressStatusMsg");
 const resultSection = document.getElementById("resultSection");
+const resultHeading = document.getElementById("resultHeading");
+const resultHeadingText = document.getElementById("resultHeadingText");
 const errorBox = document.getElementById("errorBox");
+const srStatus = document.getElementById("srStatus");
 
-// Tab Navigation
-document.querySelectorAll(".tab-btn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".tab-content").forEach((c) => c.classList.add("hidden"));
+// ==========================================
+// 1. TABS & KEYBOARD NAVIGATION (Roving Tabindex)
+// ==========================================
+const tabButtons = Array.from(document.querySelectorAll('.tab-btn[role="tab"]'));
+const tabPanels = Array.from(document.querySelectorAll('.tab-content[role="tabpanel"]'));
 
-    btn.classList.add("active");
-    const tabName = btn.dataset.tab;
-    const tabContent = document.getElementById(`tab-${tabName}`);
-    if (tabContent) tabContent.classList.remove("hidden");
+function activateTab(tabBtn, focusTab = false) {
+  const tabName = tabBtn.dataset.tab;
 
-    // Toggle single-file selector vs merge/webpdf/ocr selector
-    const singleFileSection = document.getElementById("singleFileSection");
-    if (tabName === "merge" || tabName === "webpdf" || tabName === "ocr") {
-      singleFileSection.classList.add("hidden");
-    } else {
-      singleFileSection.classList.remove("hidden");
+  tabButtons.forEach((btn) => {
+    const isSelected = btn === tabBtn;
+    btn.setAttribute("aria-selected", isSelected ? "true" : "false");
+    btn.tabIndex = isSelected ? 0 : -1;
+  });
+
+  tabPanels.forEach((panel) => {
+    panel.hidden = panel.id !== `tab-${tabName}`;
+  });
+
+  const singleFileSection = document.getElementById("singleFileSection");
+  if (singleFileSection) {
+    singleFileSection.hidden = tabName === "merge" || tabName === "webpdf" || tabName === "ocr";
+  }
+
+  tabBtn.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (focusTab) {
+    tabBtn.focus();
+  }
+
+  clearError();
+  hideResult();
+  resetMetricLabels();
+}
+
+tabButtons.forEach((btn, idx) => {
+  btn.addEventListener("click", () => activateTab(btn, false));
+  btn.addEventListener("keydown", (e) => {
+    let targetIdx = null;
+    if (e.key === "ArrowRight") targetIdx = (idx + 1) % tabButtons.length;
+    else if (e.key === "ArrowLeft") targetIdx = (idx - 1 + tabButtons.length) % tabButtons.length;
+    else if (e.key === "Home") targetIdx = 0;
+    else if (e.key === "End") targetIdx = tabButtons.length - 1;
+
+    if (targetIdx !== null) {
+      e.preventDefault();
+      activateTab(tabButtons[targetIdx], true);
     }
-
-    clearError();
-    hideResult();
-    resetMetricLabels();
   });
 });
 
 function resetMetricLabels() {
   const metricLabels = document.querySelectorAll("#metricsGrid .metric-label");
   if (metricLabels.length >= 4) {
-    metricLabels[0].textContent = "Tamaño Original";
-    metricLabels[1].textContent = "Tamaño Final";
-    metricLabels[2].textContent = "Espacio Ahorrado";
-    metricLabels[3].textContent = "Tiempo";
+    metricLabels[0].textContent = "Original Size";
+    metricLabels[1].textContent = "Final Size";
+    metricLabels[2].textContent = "Space Saved";
+    metricLabels[3].textContent = "Elapsed Time";
   }
 }
 
-// Dropzone Events for Single File
-if (dropzone) {
+// ==========================================
+// 2. SINGLE-FILE SELECTOR & LOCAL BANNER
+// ==========================================
+document.querySelectorAll(".js-select-local").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    selectLocalFile(btn.dataset.filename, btn.dataset.size);
+  });
+});
+
+const btnClearSelectedFile = document.getElementById("btnClearSelectedFile");
+if (btnClearSelectedFile) {
+  btnClearSelectedFile.addEventListener("click", clearSelectedFile);
+}
+
+if (dropzone && fileInput) {
   dropzone.addEventListener("click", () => fileInput.click());
   dropzone.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -71,9 +116,7 @@ if (dropzone) {
       handleFileChosen(e.dataTransfer.files[0]);
     }
   });
-}
 
-if (fileInput) {
   fileInput.addEventListener("change", (e) => {
     if (e.target.files && e.target.files.length > 0) {
       handleFileChosen(e.target.files[0]);
@@ -83,124 +126,51 @@ if (fileInput) {
 
 function handleFileChosen(file) {
   if (!file.name.toLowerCase().endsWith(".pdf")) {
-    showError("Por favor selecciona un archivo con extensión .pdf");
+    showError("Please select a valid .pdf file.");
     return;
   }
   currentFile = file;
   currentLocalFilename = null;
-  currentLocalFileSize = null;
 
   selectedFileName.textContent = file.name;
   selectedFileSize.textContent = `(${formatBytes(file.size)})`;
-  selectedFileBar.classList.remove("hidden");
-  dropzone.classList.add("hidden");
+  selectedFileBar.hidden = false;
+  dropzone.hidden = true;
   clearError();
 }
 
 function selectLocalFile(filename, sizeFormatted) {
   currentFile = null;
   currentLocalFilename = filename;
-  currentLocalFileSize = sizeFormatted;
 
   selectedFileName.textContent = filename;
   selectedFileSize.textContent = `(${sizeFormatted} · local)`;
-  selectedFileBar.classList.remove("hidden");
-  dropzone.classList.add("hidden");
+  selectedFileBar.hidden = false;
+  dropzone.hidden = true;
   clearError();
 
-  // Scroll smoothly to workspace
-  document.querySelector(".tabs").scrollIntoView({ behavior: "smooth" });
+  const tabBar = document.querySelector(".tabs");
+  if (tabBar) {
+    tabBar.scrollIntoView({ behavior: "smooth" });
+  }
 }
 
 function clearSelectedFile() {
   currentFile = null;
   currentLocalFilename = null;
-  currentLocalFileSize = null;
-  fileInput.value = "";
-  selectedFileBar.classList.add("hidden");
-  dropzone.classList.remove("hidden");
+  if (fileInput) fileInput.value = "";
+  selectedFileBar.hidden = true;
+  dropzone.hidden = false;
 }
 
-function selectPreset(cardEl) {
-  document.querySelectorAll("#tab-compress .option-card").forEach((c) => c.classList.remove("selected"));
-  cardEl.classList.add("selected");
-  selectedPreset = cardEl.dataset.preset;
+// ==========================================
+// 3. HELPERS
+// ==========================================
+function getRadioValue(name, fallback) {
+  const checked = document.querySelector(`input[name="${name}"]:checked`);
+  return checked ? checked.value : fallback;
 }
 
-function selectAngle(cardEl) {
-  document.querySelectorAll("#tab-rotate .option-card").forEach((c) => c.classList.remove("selected"));
-  cardEl.classList.add("selected");
-  selectedAngle = parseInt(cardEl.dataset.angle, 10);
-}
-
-// Merge Multiple Files Handling
-const mergeDropzone = document.getElementById("mergeDropzone");
-const mergeFileInput = document.getElementById("mergeFileInput");
-const mergeFileList = document.getElementById("mergeFileList");
-const btnMerge = document.getElementById("btnMerge");
-
-if (mergeDropzone) {
-  mergeDropzone.addEventListener("click", () => mergeFileInput.click());
-  mergeDropzone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    mergeDropzone.classList.add("dragover");
-  });
-  mergeDropzone.addEventListener("dragleave", () => mergeDropzone.classList.remove("dragover"));
-  mergeDropzone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    mergeDropzone.classList.remove("dragover");
-    if (e.dataTransfer.files) {
-      addMergeFiles(Array.from(e.dataTransfer.files));
-    }
-  });
-}
-
-if (mergeFileInput) {
-  mergeFileInput.addEventListener("change", (e) => {
-    if (e.target.files) {
-      addMergeFiles(Array.from(e.target.files));
-    }
-  });
-}
-
-function addMergeFiles(files) {
-  const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));
-  mergeFiles = [...mergeFiles, ...pdfs];
-  renderMergeList();
-}
-
-function removeMergeFile(index) {
-  mergeFiles.splice(index, 1);
-  renderMergeList();
-}
-
-function renderMergeList() {
-  if (!mergeFileList) return;
-  mergeFileList.innerHTML = "";
-  if (mergeFiles.length === 0) {
-    btnMerge.disabled = true;
-    return;
-  }
-
-  mergeFiles.forEach((file, idx) => {
-    const item = document.createElement("div");
-    item.className = "selected-file-indicator";
-    item.style.marginBottom = "0.5rem";
-    item.innerHTML = `
-      <div>
-        <span style="font-size:0.75rem; color:var(--text-muted); margin-right:0.5rem;">#${idx + 1}</span>
-        <span class="file-name-text">${escapeHtml(file.name)}</span>
-        <span class="file-meta-text">(${formatBytes(file.size)})</span>
-      </div>
-      <button type="button" class="btn-clear" onclick="removeMergeFile(${idx})">&times;</button>
-    `;
-    mergeFileList.appendChild(item);
-  });
-
-  btnMerge.disabled = mergeFiles.length < 2;
-}
-
-// Helpers
 function getActiveFormData() {
   const fd = new FormData();
   if (currentLocalFilename) {
@@ -208,40 +178,55 @@ function getActiveFormData() {
   } else if (currentFile) {
     fd.append("file", currentFile);
   } else {
-    showError("Por favor selecciona un archivo PDF primero.");
+    showError("Please select or drop a PDF file first.");
     return null;
   }
   return fd;
 }
 
+function announceStatus(message) {
+  if (!srStatus) return;
+  srStatus.textContent = "";
+  requestAnimationFrame(() => {
+    srStatus.textContent = message;
+  });
+}
+
 function showError(msg) {
   errorBox.textContent = msg;
-  errorBox.classList.remove("hidden");
+  errorBox.hidden = false;
 }
 
 function clearError() {
   errorBox.textContent = "";
-  errorBox.classList.add("hidden");
+  errorBox.hidden = true;
 }
 
 function showProgress(title, percent, msg) {
-  progressSection.classList.remove("hidden");
-  document.getElementById("progressTitle").textContent = title;
+  progressSection.hidden = false;
+  progressTitle.textContent = title;
   progressPercentage.textContent = `${percent}%`;
-  progressBarFill.style.width = `${percent}%`;
+  progressBar.value = percent;
   progressStatusMsg.textContent = msg;
 }
 
 function hideProgress() {
-  progressSection.classList.add("hidden");
+  progressSection.hidden = true;
 }
 
 function hideResult() {
-  resultSection.classList.add("hidden");
+  resultSection.hidden = true;
   const ocrExtraActions = document.getElementById("ocrExtraActions");
-  if (ocrExtraActions) ocrExtraActions.classList.add("hidden");
+  if (ocrExtraActions) ocrExtraActions.hidden = true;
   const ocrTextPreviewBox = document.getElementById("ocrTextPreviewBox");
-  if (ocrTextPreviewBox) ocrTextPreviewBox.classList.add("hidden");
+  if (ocrTextPreviewBox) ocrTextPreviewBox.hidden = true;
+}
+
+function revealResult(headingMsg) {
+  resultHeadingText.textContent = headingMsg;
+  resultSection.hidden = false;
+  announceStatus(headingMsg);
+  resultSection.scrollIntoView({ behavior: "smooth" });
 }
 
 function formatBytes(bytes) {
@@ -258,13 +243,18 @@ function formatBytes(bytes) {
 
 function escapeHtml(text) {
   const div = document.createElement("div");
-  div.textContent = text;
+  div.textContent = String(text ?? "");
   return div.innerHTML;
 }
 
-// Actions Execution
+// ==========================================
+// 4. COMPRESS PDF
+// ==========================================
+const btnCompress = document.getElementById("btnCompress");
+if (btnCompress) {
+  btnCompress.addEventListener("click", handleCompress);
+}
 
-// 1. COMPRESS
 async function handleCompress() {
   clearError();
   hideResult();
@@ -272,35 +262,31 @@ async function handleCompress() {
   const fd = getActiveFormData();
   if (!fd) return;
 
+  const preset = getRadioValue("compressPreset", "screen");
   const toGrayscale = document.getElementById("chkGrayscale").checked;
-  fd.append("preset", selectedPreset);
+  fd.append("preset", preset);
   fd.append("to_grayscale", toGrayscale ? "true" : "false");
 
-  const btn = document.getElementById("btnCompress");
-  btn.disabled = true;
-
-  showProgress("Iniciando compresión", 5, "Enviando documento al motor de optimización...");
+  btnCompress.disabled = true;
+  showProgress("Starting compression", 5, "Sending document to optimization engine...");
 
   try {
-    const res = await fetch("/api/compress", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/compress", { method: "POST", body: fd });
     const data = await res.json();
 
     if (!res.ok) {
-      throw new Error(data.detail || "Error al procesar la solicitud.");
+      throw new Error(data.detail || "Failed to start compression job.");
     }
 
-    pollTask(data.task_id);
+    pollCompressionTask(data.task_id);
   } catch (err) {
-    btn.disabled = false;
+    btnCompress.disabled = false;
     hideProgress();
     showError(err.message);
   }
 }
 
-function pollTask(taskId) {
+function pollCompressionTask(taskId) {
   if (pollInterval) clearInterval(pollInterval);
 
   pollInterval = setInterval(async () => {
@@ -310,50 +296,56 @@ function pollTask(taskId) {
 
       if (!res.ok) {
         clearInterval(pollInterval);
-        document.getElementById("btnCompress").disabled = false;
+        btnCompress.disabled = false;
         hideProgress();
-        showError("Error consultando estado de la tarea.");
+        showError("Failed to query compression task status.");
         return;
       }
 
-      showProgress("Aligerando PDF...", task.progress, task.message);
+      showProgress("Compressing PDF...", task.progress, task.message);
 
       if (task.status === "completed") {
         clearInterval(pollInterval);
-        document.getElementById("btnCompress").disabled = false;
+        btnCompress.disabled = false;
         hideProgress();
         showCompressionResult(task.result);
       } else if (task.status === "failed") {
         clearInterval(pollInterval);
-        document.getElementById("btnCompress").disabled = false;
+        btnCompress.disabled = false;
         hideProgress();
-        showError(task.message || "La compresión falló.");
+        showError(task.message || "Compression failed.");
       }
-    } catch (e) {
+    } catch {
       clearInterval(pollInterval);
-      document.getElementById("btnCompress").disabled = false;
+      btnCompress.disabled = false;
       hideProgress();
-      showError("Error de conexión durante el proceso.");
+      showError("Network error while checking compression progress.");
     }
   }, 750);
 }
 
 function showCompressionResult(res) {
-  document.getElementById("resultHeading").textContent = "¡PDF aligerado con éxito!";
+  resetMetricLabels();
   document.getElementById("resOrigSize").textContent = res.original_size_formatted;
   document.getElementById("resCompSize").textContent = res.compressed_size_formatted;
   document.getElementById("resSaved").textContent = `-${res.saved_percentage}% (${res.saved_bytes_formatted})`;
   document.getElementById("resDuration").textContent = `${res.duration_seconds}s`;
 
   const btnDl = document.getElementById("btnDownloadLink");
-  btnDl.href = `/api/download/${res.filename}`;
-  btnDl.textContent = `Descargar PDF Aligerado (${res.compressed_size_formatted})`;
+  btnDl.href = `/api/download/${encodeURIComponent(res.filename)}`;
+  btnDl.textContent = `Download Compressed PDF (${res.compressed_size_formatted})`;
 
-  resultSection.classList.remove("hidden");
-  resultSection.scrollIntoView({ behavior: "smooth" });
+  revealResult("PDF compressed successfully!");
 }
 
-// 2. SPLIT / EXTRACT
+// ==========================================
+// 5. SPLIT / EXTRACT PAGES
+// ==========================================
+const btnSplit = document.getElementById("btnSplit");
+if (btnSplit) {
+  btnSplit.addEventListener("click", handleSplit);
+}
+
 async function handleSplit() {
   clearError();
   hideResult();
@@ -363,83 +355,183 @@ async function handleSplit() {
 
   const ranges = document.getElementById("pageRanges").value.trim();
   if (!ranges) {
-    showError("Por favor ingresa los rangos de páginas a extraer (ej: 1-5, 8).");
+    showError("Please enter page numbers or ranges to extract (e.g., 1-5, 8).");
+    document.getElementById("pageRanges").focus();
     return;
   }
   fd.append("page_ranges", ranges);
 
-  showProgress("Extrayendo páginas", 50, "Generando nuevo PDF con las páginas seleccionadas...");
+  btnSplit.disabled = true;
+  showProgress("Extracting pages", 50, "Building a new PDF with the selected pages...");
 
   try {
-    const res = await fetch("/api/split", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/split", { method: "POST", body: fd });
     const data = await res.json();
     hideProgress();
+    btnSplit.disabled = false;
 
-    if (!res.ok) throw new Error(data.detail || "Error al dividir el PDF.");
+    if (!res.ok) throw new Error(data.detail || "Failed to extract pages.");
 
-    document.getElementById("resultHeading").textContent = `¡Páginas extraídas! (${data.extracted_pages} páginas)`;
+    resetMetricLabels();
     document.getElementById("resOrigSize").textContent = "-";
     document.getElementById("resCompSize").textContent = data.size_formatted;
-    document.getElementById("resSaved").textContent = `${data.extracted_pages} páginas`;
-    document.getElementById("resDuration").textContent = "Instantáneo";
+    document.getElementById("resSaved").textContent = `${data.extracted_pages} page(s)`;
+    document.getElementById("resDuration").textContent = "Instant";
 
     const btnDl = document.getElementById("btnDownloadLink");
-    btnDl.href = `/api/download/${data.filename}`;
-    btnDl.textContent = `Descargar PDF Extraído (${data.size_formatted})`;
+    btnDl.href = `/api/download/${encodeURIComponent(data.filename)}`;
+    btnDl.textContent = `Download Extracted PDF (${data.size_formatted})`;
 
-    resultSection.classList.remove("hidden");
+    revealResult(`Pages extracted (${data.extracted_pages} pages)!`);
   } catch (err) {
+    btnSplit.disabled = false;
     hideProgress();
     showError(err.message);
   }
 }
 
-// 3. MERGE
+// ==========================================
+// 6. MERGE MULTIPLE PDFS
+// ==========================================
+const mergeDropzone = document.getElementById("mergeDropzone");
+const mergeFileInput = document.getElementById("mergeFileInput");
+const mergeFileList = document.getElementById("mergeFileList");
+const btnMerge = document.getElementById("btnMerge");
+
+if (mergeDropzone && mergeFileInput) {
+  mergeDropzone.addEventListener("click", () => mergeFileInput.click());
+  mergeDropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    mergeDropzone.classList.add("dragover");
+  });
+  mergeDropzone.addEventListener("dragleave", () => mergeDropzone.classList.remove("dragover"));
+  mergeDropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    mergeDropzone.classList.remove("dragover");
+    if (e.dataTransfer.files) {
+      addMergeFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+
+  mergeFileInput.addEventListener("change", (e) => {
+    if (e.target.files) {
+      addMergeFiles(Array.from(e.target.files));
+      mergeFileInput.value = "";
+    }
+  });
+}
+
+if (mergeFileList) {
+  mergeFileList.addEventListener("click", (e) => {
+    const removeBtn = e.target.closest("button[data-remove-merge-idx]");
+    if (!removeBtn) return;
+    const idx = parseInt(removeBtn.dataset.removeMergeIdx, 10);
+    if (!Number.isNaN(idx)) {
+      mergeFiles.splice(idx, 1);
+      renderMergeList();
+    }
+  });
+}
+
+if (btnMerge) {
+  btnMerge.addEventListener("click", handleMerge);
+}
+
+function addMergeFiles(files) {
+  const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));
+  if (pdfs.length === 0) {
+    showError("Please select valid .pdf files to merge.");
+    return;
+  }
+  mergeFiles = [...mergeFiles, ...pdfs];
+  clearError();
+  renderMergeList();
+}
+
+function renderMergeList() {
+  if (!mergeFileList) return;
+  mergeFileList.innerHTML = "";
+  if (mergeFiles.length === 0) {
+    btnMerge.disabled = true;
+    return;
+  }
+
+  mergeFiles.forEach((file, idx) => {
+    const item = document.createElement("div");
+    item.className = "selected-file-indicator";
+    item.style.marginBottom = "0.5rem";
+
+    const info = document.createElement("div");
+    info.innerHTML = `
+      <span style="font-size:0.75rem; color:var(--text-muted); margin-right:0.5rem;">#${idx + 1}</span>
+      <span class="file-name-text">${escapeHtml(file.name)}</span>
+      <span class="file-meta-text">(${formatBytes(file.size)})</span>
+    `;
+
+    const rmBtn = document.createElement("button");
+    rmBtn.type = "button";
+    rmBtn.className = "btn-clear";
+    rmBtn.dataset.removeMergeIdx = String(idx);
+    rmBtn.setAttribute("aria-label", `Remove ${file.name}`);
+    rmBtn.innerHTML = "&times;";
+
+    item.appendChild(info);
+    item.appendChild(rmBtn);
+    mergeFileList.appendChild(item);
+  });
+
+  btnMerge.disabled = mergeFiles.length < 2;
+}
+
 async function handleMerge() {
   clearError();
   hideResult();
 
   if (mergeFiles.length < 2) {
-    showError("Debes seleccionar al menos dos archivos PDF.");
+    showError("Please select at least two PDF files.");
     return;
   }
 
   const fd = new FormData();
   mergeFiles.forEach((f) => fd.append("files", f));
 
-  showProgress("Uniendo PDFs", 50, "Combinando documentos y optimizando referencias...");
+  btnMerge.disabled = true;
+  showProgress("Merging PDFs", 50, "Combining documents and optimizing page references...");
 
   try {
-    const res = await fetch("/api/merge", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/merge", { method: "POST", body: fd });
     const data = await res.json();
     hideProgress();
+    btnMerge.disabled = mergeFiles.length < 2;
 
-    if (!res.ok) throw new Error(data.detail || "Error al unir los PDFs.");
+    if (!res.ok) throw new Error(data.detail || "Failed to merge PDFs.");
 
-    document.getElementById("resultHeading").textContent = `¡PDFs unidos con éxito! (${data.total_pages} páginas)`;
+    resetMetricLabels();
     document.getElementById("resOrigSize").textContent = "-";
     document.getElementById("resCompSize").textContent = data.size_formatted;
-    document.getElementById("resSaved").textContent = `${data.total_pages} págs.`;
-    document.getElementById("resDuration").textContent = "Instantáneo";
+    document.getElementById("resSaved").textContent = `${data.total_pages} page(s)`;
+    document.getElementById("resDuration").textContent = "Instant";
 
     const btnDl = document.getElementById("btnDownloadLink");
-    btnDl.href = `/api/download/${data.filename}`;
-    btnDl.textContent = `Descargar PDF Combinado (${data.size_formatted})`;
+    btnDl.href = `/api/download/${encodeURIComponent(data.filename)}`;
+    btnDl.textContent = `Download Merged PDF (${data.size_formatted})`;
 
-    resultSection.classList.remove("hidden");
+    revealResult(`PDFs merged successfully (${data.total_pages} pages)!`);
   } catch (err) {
+    btnMerge.disabled = mergeFiles.length < 2;
     hideProgress();
     showError(err.message);
   }
 }
 
-// 4. ROTATE
+// ==========================================
+// 7. ROTATE PAGES
+// ==========================================
+const btnRotate = document.getElementById("btnRotate");
+if (btnRotate) {
+  btnRotate.addEventListener("click", handleRotate);
+}
+
 async function handleRotate() {
   clearError();
   hideResult();
@@ -447,40 +539,48 @@ async function handleRotate() {
   const fd = getActiveFormData();
   if (!fd) return;
 
+  const angle = getRadioValue("rotateAngle", "90");
   const ranges = document.getElementById("rotateRanges").value.trim();
-  fd.append("angle", selectedAngle);
+  fd.append("angle", angle);
   if (ranges) fd.append("page_ranges", ranges);
 
-  showProgress("Rotando páginas", 50, `Aplicando rotación de ${selectedAngle}°...`);
+  btnRotate.disabled = true;
+  showProgress("Rotating pages", 50, `Applying ${angle}° rotation...`);
 
   try {
-    const res = await fetch("/api/rotate", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/rotate", { method: "POST", body: fd });
     const data = await res.json();
     hideProgress();
+    btnRotate.disabled = false;
 
-    if (!res.ok) throw new Error(data.detail || "Error al rotar páginas.");
+    if (!res.ok) throw new Error(data.detail || "Failed to rotate pages.");
 
-    document.getElementById("resultHeading").textContent = `¡Páginas rotadas (${data.angle}°)!`;
+    resetMetricLabels();
     document.getElementById("resOrigSize").textContent = "-";
     document.getElementById("resCompSize").textContent = data.size_formatted;
-    document.getElementById("resSaved").textContent = `${data.rotated_pages_count} págs. rotadas`;
-    document.getElementById("resDuration").textContent = "Instantáneo";
+    document.getElementById("resSaved").textContent = `${data.rotated_pages_count} page(s) rotated`;
+    document.getElementById("resDuration").textContent = "Instant";
 
     const btnDl = document.getElementById("btnDownloadLink");
-    btnDl.href = `/api/download/${data.filename}`;
-    btnDl.textContent = `Descargar PDF Rotado (${data.size_formatted})`;
+    btnDl.href = `/api/download/${encodeURIComponent(data.filename)}`;
+    btnDl.textContent = `Download Rotated PDF (${data.size_formatted})`;
 
-    resultSection.classList.remove("hidden");
+    revealResult(`Pages rotated (${data.angle}°)!`);
   } catch (err) {
+    btnRotate.disabled = false;
     hideProgress();
     showError(err.message);
   }
 }
 
-// 5. INSPECT
+// ==========================================
+// 8. INSPECT & EDIT METADATA
+// ==========================================
+const btnInspect = document.getElementById("btnInspect");
+if (btnInspect) {
+  btnInspect.addEventListener("click", handleInspect);
+}
+
 async function handleInspect() {
   clearError();
   hideResult();
@@ -491,65 +591,80 @@ async function handleInspect() {
   const fd = getActiveFormData();
   if (!fd) return;
 
-  showProgress("Analizando PDF", 50, "Leyendo metadatos, objetos y páginas...");
+  btnInspect.disabled = true;
+  showProgress("Inspecting PDF", 50, "Reading metadata, dimensions, and page structure...");
 
   try {
-    const res = await fetch("/api/inspect", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/inspect", { method: "POST", body: fd });
     const data = await res.json();
     hideProgress();
+    btnInspect.disabled = false;
 
-    if (!res.ok) throw new Error(data.detail || "Error al analizar el PDF.");
+    if (!res.ok) throw new Error(data.detail || "Failed to inspect PDF.");
 
     const meta = data.metadata || {};
-    container.innerHTML = `
-      <table class="info-table">
-        <tbody>
-          <tr><th>Nombre de archivo</th><td>${escapeHtml(data.filename)}</td></tr>
-          <tr><th>Tamaño</th><td>${escapeHtml(data.filesize_formatted)} (${data.filesize_bytes.toLocaleString()} bytes)</td></tr>
-          <tr><th>Páginas totales</th><td><strong>${data.pages}</strong></td></tr>
-          <tr><th>Dimensiones de página</th><td>${escapeHtml(data.dimensions)}</td></tr>
-          <tr><th>Título actual</th><td>${escapeHtml(meta.title)}</td></tr>
-          <tr><th>Autor actual</th><td>${escapeHtml(meta.author)}</td></tr>
-          <tr><th>Generador / Creador</th><td>${escapeHtml(meta.creator)}</td></tr>
-          <tr><th>Productor</th><td>${escapeHtml(meta.producer)}</td></tr>
-          <tr><th>Fecha creación</th><td>${escapeHtml(meta.creation_date)}</td></tr>
-          <tr><th>Imágenes (en muestra)</th><td>${data.sample_images_first_pages} imágenes en las primeras ${data.sample_pages_checked} págs.</td></tr>
-          <tr><th>Protegido / Encriptado</th><td>${data.is_encrypted ? "Sí" : "No"}</td></tr>
-        </tbody>
-      </table>
+    const titleVal = meta.title && meta.title !== "Untitled" ? meta.title : "";
+    const authorVal = meta.author && meta.author !== "Not specified" ? meta.author : "";
 
-      <!-- Editor de Metadatos para Zotero -->
-      <div style="margin-top: 1.25rem; background-color: var(--bg-subtle); padding: 1.1rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
-        <h4 style="font-size: 0.9rem; font-weight: 700; margin-bottom: 0.75rem; color: var(--text-main);">Editar Metadatos de este PDF (para Zotero)</h4>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem;">
-          <div>
-            <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.2rem;">Título</label>
-            <input type="text" id="editMetaTitle" class="input-text" value="${escapeHtml(meta.title !== 'Sin título' ? meta.title : '')}">
-          </div>
-          <div>
-            <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.2rem;">Autor</label>
-            <input type="text" id="editMetaAuthor" class="input-text" value="${escapeHtml(meta.author !== 'No especificado' ? meta.author : '')}">
-          </div>
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; margin-bottom: 0.75rem;">
-          <div>
-            <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.2rem;">Asunto / Materia</label>
-            <input type="text" id="editMetaSubject" class="input-text" value="${escapeHtml(meta.subject || '')}">
-          </div>
-          <div>
-            <label style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 0.2rem;">Palabras Clave (Keywords)</label>
-            <input type="text" id="editMetaKeywords" class="input-text" value="${escapeHtml(meta.keywords || '')}">
-          </div>
-        </div>
-        <button type="button" class="btn-primary" onclick="handleSaveMetadata()" style="font-size: 0.85rem; padding: 0.55rem 1.1rem;">
-          Guardar y Descargar con nuevos metadatos
-        </button>
+    container.innerHTML = `
+      <div class="table-scroll">
+        <table class="info-table">
+          <caption class="visually-hidden">Technical details and metadata for ${escapeHtml(data.filename)}</caption>
+          <tbody>
+            <tr><th scope="row">Filename</th><td>${escapeHtml(data.filename)}</td></tr>
+            <tr><th scope="row">File Size</th><td>${escapeHtml(data.filesize_formatted)} (${data.filesize_bytes.toLocaleString()} bytes)</td></tr>
+            <tr><th scope="row">Total Pages</th><td><strong>${data.pages}</strong></td></tr>
+            <tr><th scope="row">Page Dimensions</th><td>${escapeHtml(data.dimensions)}</td></tr>
+            <tr><th scope="row">Title</th><td>${escapeHtml(meta.title)}</td></tr>
+            <tr><th scope="row">Author</th><td>${escapeHtml(meta.author)}</td></tr>
+            <tr><th scope="row">Creator Application</th><td>${escapeHtml(meta.creator)}</td></tr>
+            <tr><th scope="row">PDF Producer</th><td>${escapeHtml(meta.producer)}</td></tr>
+            <tr><th scope="row">Creation Date</th><td>${escapeHtml(meta.creation_date)}</td></tr>
+            <tr><th scope="row">Images (Sampled)</th><td>${data.sample_images_first_pages} images across first ${data.sample_pages_checked} page(s)</td></tr>
+            <tr><th scope="row">Encrypted / Protected</th><td>${data.is_encrypted ? "Yes" : "No"}</td></tr>
+          </tbody>
+        </table>
       </div>
+
+      <form id="editMetadataForm" class="meta-edit-box" novalidate>
+        <h3 class="meta-edit-heading">Edit PDF Metadata (for Zotero)</h3>
+        <div class="meta-grid-two">
+          <div>
+            <label class="meta-field-label" for="editMetaTitle">Title</label>
+            <input type="text" id="editMetaTitle" class="input-text" value="${escapeHtml(titleVal)}">
+          </div>
+          <div>
+            <label class="meta-field-label" for="editMetaAuthor">Author</label>
+            <input type="text" id="editMetaAuthor" class="input-text" value="${escapeHtml(authorVal)}">
+          </div>
+        </div>
+        <div class="meta-grid-two">
+          <div>
+            <label class="meta-field-label" for="editMetaSubject">Subject</label>
+            <input type="text" id="editMetaSubject" class="input-text" value="${escapeHtml(meta.subject || "")}">
+          </div>
+          <div>
+            <label class="meta-field-label" for="editMetaKeywords">Keywords</label>
+            <input type="text" id="editMetaKeywords" class="input-text" value="${escapeHtml(meta.keywords || "")}">
+          </div>
+        </div>
+        <button type="submit" class="btn-primary" id="btnSaveMetadata" style="font-size: 0.85rem; padding: 0.55rem 1.1rem;">
+          Save &amp; Download with Updated Metadata
+        </button>
+      </form>
     `;
+
+    const editForm = document.getElementById("editMetadataForm");
+    if (editForm) {
+      editForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        handleSaveMetadata();
+      });
+    }
+
+    announceStatus(`Inspection complete: ${data.pages} pages in ${data.filename}`);
   } catch (err) {
+    btnInspect.disabled = false;
     hideProgress();
     showError(err.message);
   }
@@ -560,80 +675,98 @@ async function handleSaveMetadata() {
   const fd = getActiveFormData();
   if (!fd) return;
 
-  const title = document.getElementById("editMetaTitle") ? document.getElementById("editMetaTitle").value.trim() : "";
-  const author = document.getElementById("editMetaAuthor") ? document.getElementById("editMetaAuthor").value.trim() : "";
-  const subject = document.getElementById("editMetaSubject") ? document.getElementById("editMetaSubject").value.trim() : "";
-  const keywords = document.getElementById("editMetaKeywords") ? document.getElementById("editMetaKeywords").value.trim() : "";
+  const titleEl = document.getElementById("editMetaTitle");
+  const authorEl = document.getElementById("editMetaAuthor");
+  const subjectEl = document.getElementById("editMetaSubject");
+  const keywordsEl = document.getElementById("editMetaKeywords");
 
-  fd.append("title", title);
-  fd.append("author", author);
-  fd.append("subject", subject);
-  fd.append("keywords", keywords);
+  fd.append("title", titleEl ? titleEl.value.trim() : "");
+  fd.append("author", authorEl ? authorEl.value.trim() : "");
+  fd.append("subject", subjectEl ? subjectEl.value.trim() : "");
+  fd.append("keywords", keywordsEl ? keywordsEl.value.trim() : "");
 
-  showProgress("Actualizando metadatos", 50, "Escribiendo campos de autor y título en el archivo PDF...");
+  const saveBtn = document.getElementById("btnSaveMetadata");
+  if (saveBtn) saveBtn.disabled = true;
+  showProgress("Updating metadata", 50, "Writing updated title, author, and keywords to PDF...");
 
   try {
     const res = await fetch("/api/update-metadata", { method: "POST", body: fd });
     const data = await res.json();
     hideProgress();
+    if (saveBtn) saveBtn.disabled = false;
 
-    if (!res.ok) throw new Error(data.detail || "Error al actualizar metadatos.");
+    if (!res.ok) throw new Error(data.detail || "Failed to update PDF metadata.");
 
-    document.getElementById("resultHeading").textContent = "¡Metadatos actualizados con éxito!";
-    document.getElementById("resOrigSize").textContent = data.author || "No especificado";
+    document.getElementById("resOrigSize").textContent = data.author || "Not specified";
     document.getElementById("resCompSize").textContent = data.size_formatted;
-    document.getElementById("resSaved").textContent = data.title || "PDF Actualizado";
-    document.getElementById("resDuration").textContent = "Instantáneo";
+    document.getElementById("resSaved").textContent = data.title || "Updated PDF";
+    document.getElementById("resDuration").textContent = "Instant";
 
     const metricLabels = document.querySelectorAll("#metricsGrid .metric-label");
     if (metricLabels.length >= 4) {
-      metricLabels[0].textContent = "Autor";
-      metricLabels[1].textContent = "Tamaño";
-      metricLabels[2].textContent = "Título";
-      metricLabels[3].textContent = "Estado";
+      metricLabels[0].textContent = "Author";
+      metricLabels[1].textContent = "File Size";
+      metricLabels[2].textContent = "Title";
+      metricLabels[3].textContent = "Status";
     }
 
     const btnDl = document.getElementById("btnDownloadLink");
-    btnDl.href = `/api/download/${data.filename}`;
-    btnDl.textContent = `Descargar PDF con nuevos metadatos (${data.size_formatted})`;
+    btnDl.href = `/api/download/${encodeURIComponent(data.filename)}`;
+    btnDl.textContent = `Download Updated PDF (${data.size_formatted})`;
 
-    resultSection.classList.remove("hidden");
-    resultSection.scrollIntoView({ behavior: "smooth" });
+    revealResult("PDF metadata updated successfully!");
   } catch (err) {
+    if (saveBtn) saveBtn.disabled = false;
     hideProgress();
     showError(err.message);
   }
 }
 
-// 6. WEB TO PDF (ZOTERO)
-let selectedZoteroMode = "standalone";
-let selectedWebMode = "reader";
-let selectedWebStyle = "academic";
+// ==========================================
+// 9. WEB TO PDF (ZOTERO)
+// ==========================================
+const webUrlInput = document.getElementById("webUrlInput");
+const btnDetectMeta = document.getElementById("btnDetectMeta");
+const btnWebToPdf = document.getElementById("btnWebToPdf");
 
-function selectZoteroMode(cardEl) {
-  document.querySelectorAll("#tab-webpdf .option-card[data-zoteromode]").forEach((c) => c.classList.remove("selected"));
-  cardEl.classList.add("selected");
-  selectedZoteroMode = cardEl.dataset.zoteromode;
+document.querySelectorAll("button[data-sample-url]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (webUrlInput) {
+      webUrlInput.value = btn.dataset.sampleUrl || "";
+      detectUrlMetadata();
+    }
+  });
+});
+
+if (webUrlInput) {
+  webUrlInput.addEventListener("change", detectUrlMetadata);
 }
 
-function setSampleUrl(url) {
-  const input = document.getElementById("webUrlInput");
-  if (input) {
-    input.value = url;
-    detectUrlMetadata();
-  }
+if (btnDetectMeta) {
+  btnDetectMeta.addEventListener("click", detectUrlMetadata);
+}
+
+document.querySelectorAll('input[name="webMode"]').forEach((radio) => {
+  radio.addEventListener("change", () => {
+    const readerOpts = document.getElementById("readerOptions");
+    if (readerOpts) {
+      readerOpts.hidden = getRadioValue("webMode", "reader") === "fullpage";
+    }
+  });
+});
+
+if (btnWebToPdf) {
+  btnWebToPdf.addEventListener("click", handleWebToPdf);
 }
 
 async function detectUrlMetadata() {
-  const urlInput = document.getElementById("webUrlInput");
-  const url = urlInput ? urlInput.value.trim() : "";
+  const url = webUrlInput ? webUrlInput.value.trim() : "";
   if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) return;
 
-  const btnDetect = document.getElementById("btnDetectMeta");
-  const origBtnText = btnDetect ? btnDetect.textContent : "";
-  if (btnDetect) {
-    btnDetect.disabled = true;
-    btnDetect.textContent = "Detectando...";
+  const origBtnText = btnDetectMeta ? btnDetectMeta.textContent : "";
+  if (btnDetectMeta) {
+    btnDetectMeta.disabled = true;
+    btnDetectMeta.textContent = "Detecting...";
   }
 
   try {
@@ -642,144 +775,112 @@ async function detectUrlMetadata() {
     const res = await fetch("/api/web-metadata", { method: "POST", body: fd });
     if (res.ok) {
       const data = await res.json();
-      if (data.author) document.getElementById("webAuthorInput").value = data.author;
-      if (data.title) document.getElementById("webTitleInput").value = data.title;
-      if (data.date) document.getElementById("webDateInput").value = data.date;
+      document.getElementById("webAuthorInput").value = data.author || "";
+      document.getElementById("webTitleInput").value = data.title || "";
+      document.getElementById("webDateInput").value = data.date || "";
     }
-  } catch (e) {
-    console.error("Error detectando metadatos", e);
+  } catch (err) {
+    console.error("Failed to detect metadata", err);
   } finally {
-    if (btnDetect) {
-      btnDetect.disabled = false;
-      btnDetect.textContent = origBtnText;
+    if (btnDetectMeta) {
+      btnDetectMeta.disabled = false;
+      btnDetectMeta.textContent = origBtnText;
     }
   }
-}
-
-function autoDetectUrlMetadata() {
-  detectUrlMetadata();
-}
-
-function selectWebMode(cardEl) {
-  document.querySelectorAll("#tab-webpdf .option-card[data-webmode]").forEach((c) => c.classList.remove("selected"));
-  cardEl.classList.add("selected");
-  selectedWebMode = cardEl.dataset.webmode;
-
-  const readerOpts = document.getElementById("readerOptions");
-  if (readerOpts) {
-    if (selectedWebMode === "fullpage") {
-      readerOpts.classList.add("hidden");
-    } else {
-      readerOpts.classList.remove("hidden");
-    }
-  }
-}
-
-function selectWebStyle(cardEl) {
-  document.querySelectorAll("#tab-webpdf .option-card[data-webstyle]").forEach((c) => c.classList.remove("selected"));
-  cardEl.classList.add("selected");
-  selectedWebStyle = cardEl.dataset.webstyle;
 }
 
 async function handleWebToPdf() {
   clearError();
   hideResult();
 
-  const urlInput = document.getElementById("webUrlInput");
-  const rawUrl = urlInput ? urlInput.value.trim() : "";
-
+  const rawUrl = webUrlInput ? webUrlInput.value.trim() : "";
   if (!rawUrl) {
-    showError("Por favor ingresa la URL de la página o artículo que deseas convertir.");
+    showError("Please enter the URL of the article or webpage you want to convert.");
+    if (webUrlInput) webUrlInput.focus();
     return;
   }
 
   if (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) {
-    showError("La URL debe comenzar con http:// o https://");
+    showError("URL must start with http:// or https://");
+    if (webUrlInput) webUrlInput.focus();
     return;
   }
 
-  const btn = document.getElementById("btnWebToPdf");
-  btn.disabled = true;
+  btnWebToPdf.disabled = true;
 
+  const webMode = getRadioValue("webMode", "reader");
+  const webStyle = getRadioValue("webStyle", "academic");
+  const zoteroMode = getRadioValue("zoteroMode", "standalone");
   const chkImages = document.getElementById("chkWebImages");
   const includeImages = chkImages ? chkImages.checked : true;
 
-  const customAuthor = document.getElementById("webAuthorInput") ? document.getElementById("webAuthorInput").value.trim() : "";
-  const customTitle = document.getElementById("webTitleInput") ? document.getElementById("webTitleInput").value.trim() : "";
-  const customDate = document.getElementById("webDateInput") ? document.getElementById("webDateInput").value.trim() : "";
+  const customAuthor = document.getElementById("webAuthorInput").value.trim();
+  const customTitle = document.getElementById("webTitleInput").value.trim();
+  const customDate = document.getElementById("webDateInput").value.trim();
 
   showProgress(
-    "Extrayendo y formateando artículo...",
-    30,
-    "Descargando contenido web, eliminando publicidad y generando maquetación limpia para Zotero..."
+    "Extracting & rendering article...",
+    35,
+    "Downloading webpage, cleaning clutter, and building selectable PDF..."
   );
 
   const fd = new FormData();
   fd.append("url", rawUrl);
-  fd.append("mode", selectedWebMode);
-  fd.append("style", selectedWebStyle);
+  fd.append("mode", webMode);
+  fd.append("style", webStyle);
   fd.append("include_images", includeImages ? "true" : "false");
-  fd.append("zotero_mode", selectedZoteroMode);
+  fd.append("zotero_mode", zoteroMode);
   if (customAuthor) fd.append("custom_author", customAuthor);
   if (customTitle) fd.append("custom_title", customTitle);
   if (customDate) fd.append("custom_date", customDate);
 
   try {
-    const res = await fetch("/api/web-to-pdf", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/web-to-pdf", { method: "POST", body: fd });
     const data = await res.json();
     hideProgress();
-    btn.disabled = false;
+    btnWebToPdf.disabled = false;
 
     if (!res.ok) {
-      throw new Error(data.detail || "Error al convertir la página a PDF.");
+      throw new Error(data.detail || "Failed to convert webpage to PDF.");
     }
 
-    // Render result
-    document.getElementById("resultHeading").textContent = `¡Artículo convertido a PDF! (${data.pages} páginas)`;
-    document.getElementById("resOrigSize").textContent = data.author && data.author !== "No especificado" ? data.author : "Artículo Web";
+    document.getElementById("resOrigSize").textContent =
+      data.author && data.author !== "Not specified" ? data.author : "Web Article";
     document.getElementById("resCompSize").textContent = data.filesize_formatted;
-    document.getElementById("resSaved").textContent = `${data.pages} páginas`;
-    document.getElementById("resDuration").textContent = "100% Vectorial";
+    document.getElementById("resSaved").textContent = `${data.pages} page(s)`;
+    document.getElementById("resDuration").textContent = "100% Vector";
 
-    // Change labels temporarily for Web to PDF result
     const metricLabels = document.querySelectorAll("#metricsGrid .metric-label");
     if (metricLabels.length >= 4) {
-      metricLabels[0].textContent = "Autor Detectado";
-      metricLabels[1].textContent = "Tamaño PDF";
-      metricLabels[2].textContent = "Páginas";
-      metricLabels[3].textContent = "Texto en Zotero";
+      metricLabels[0].textContent = "Detected Author";
+      metricLabels[1].textContent = "PDF Size";
+      metricLabels[2].textContent = "Pages";
+      metricLabels[3].textContent = "Text Layer";
     }
 
     const btnDl = document.getElementById("btnDownloadLink");
-    btnDl.href = `/api/download/${data.filename}`;
-    btnDl.textContent = `Descargar PDF para Zotero (${data.filesize_formatted})`;
+    btnDl.href = `/api/download/${encodeURIComponent(data.filename)}`;
+    btnDl.textContent = `Download PDF for Zotero (${data.filesize_formatted})`;
 
-    resultSection.classList.remove("hidden");
-    resultSection.scrollIntoView({ behavior: "smooth" });
+    revealResult(`Article converted to PDF (${data.pages} pages)!`);
   } catch (err) {
-    btn.disabled = false;
+    btnWebToPdf.disabled = false;
     hideProgress();
     showError(err.message);
   }
 }
 
 // ==========================================
-// 7. OCR SCANNER / DIGITALIZAR LIBRO
+// 10. OCR SCANNER / DIGITIZE BOOK OR DOCUMENT
 // ==========================================
-let ocrFiles = [];
-let selectedOcrLang = "spa";
-let lastExtractedOcrText = "";
-let ocrPollInterval = null;
-
 const ocrDropzone = document.getElementById("ocrDropzone");
 const ocrFileInput = document.getElementById("ocrFileInput");
 const ocrPreviewSection = document.getElementById("ocrPreviewSection");
 const ocrPreviewGrid = document.getElementById("ocrPreviewGrid");
 const ocrPageCountText = document.getElementById("ocrPageCountText");
 const btnRunOcr = document.getElementById("btnRunOcr");
+const btnClearOcrFiles = document.getElementById("btnClearOcrFiles");
+const btnCopyOcrText = document.getElementById("btnCopyOcrText");
 
 if (ocrDropzone && ocrFileInput) {
   ocrDropzone.addEventListener("click", () => ocrFileInput.click());
@@ -804,26 +905,60 @@ if (ocrDropzone && ocrFileInput) {
   });
 }
 
+if (btnClearOcrFiles) {
+  btnClearOcrFiles.addEventListener("click", clearOcrFiles);
+}
+
+if (ocrPreviewGrid) {
+  ocrPreviewGrid.addEventListener("click", (e) => {
+    const removeBtn = e.target.closest("button[data-remove-ocr-idx]");
+    if (!removeBtn) return;
+    e.stopPropagation();
+    const idx = parseInt(removeBtn.dataset.removeOcrIdx, 10);
+    if (!Number.isNaN(idx) && idx >= 0 && idx < ocrFiles.length) {
+      ocrFiles.splice(idx, 1);
+      renderOcrPreviews();
+    }
+  });
+}
+
+if (btnRunOcr) {
+  btnRunOcr.addEventListener("click", handleOcrScan);
+}
+
+if (btnCopyOcrText) {
+  btnCopyOcrText.addEventListener("click", copyOcrText);
+}
+
 function naturalSortComparator(a, b) {
   return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function revokeOcrObjectUrls() {
+  ocrObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+  ocrObjectUrls = [];
 }
 
 function handleOcrFilesChosen(newFiles) {
   const allowedExts = [".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp", ".pdf"];
   const validFiles = newFiles.filter((f) => {
-    const ext = "." + f.name.split(".").pop().toLowerCase();
+    const parts = f.name.split(".");
+    const ext = parts.length > 1 ? "." + parts.pop().toLowerCase() : "";
     return allowedExts.includes(ext);
   });
 
   if (validFiles.length === 0) {
-    showError("Por favor selecciona imágenes válidas (JPG, PNG, WEBP, TIFF) o un archivo PDF.");
+    showError("Please select valid images (JPG, PNG, WEBP, TIFF, BMP) or a PDF file.");
     return;
   }
 
-  const hasPdf = validFiles.some((f) => f.name.toLowerCase().endsWith(".pdf"));
-  if (hasPdf) {
-    ocrFiles = [validFiles.find((f) => f.name.toLowerCase().endsWith(".pdf"))];
+  const pdfFile = validFiles.find((f) => f.name.toLowerCase().endsWith(".pdf"));
+  if (pdfFile) {
+    ocrFiles = [pdfFile];
   } else {
+    if (ocrFiles.length === 1 && ocrFiles[0].name.toLowerCase().endsWith(".pdf")) {
+      ocrFiles = [];
+    }
     const existingNames = new Set(ocrFiles.map((f) => f.name));
     validFiles.forEach((f) => {
       if (!existingNames.has(f.name)) {
@@ -840,37 +975,40 @@ function handleOcrFilesChosen(newFiles) {
 function renderOcrPreviews() {
   if (!ocrPreviewGrid || !ocrPreviewSection || !btnRunOcr) return;
 
+  revokeOcrObjectUrls();
+
   if (ocrFiles.length === 0) {
-    ocrPreviewSection.classList.add("hidden");
+    ocrPreviewSection.hidden = true;
     btnRunOcr.disabled = true;
+    ocrPreviewGrid.innerHTML = "";
     return;
   }
 
-  ocrPreviewSection.classList.remove("hidden");
+  ocrPreviewSection.hidden = false;
   btnRunOcr.disabled = false;
   ocrPreviewGrid.innerHTML = "";
 
   const isSinglePdf = ocrFiles.length === 1 && ocrFiles[0].name.toLowerCase().endsWith(".pdf");
 
   if (isSinglePdf) {
-    ocrPageCountText.textContent = `Archivo PDF escaneado listo: ${ocrFiles[0].name} (${formatBytes(ocrFiles[0].size)})`;
+    ocrPageCountText.textContent = `Scanned PDF ready: ${ocrFiles[0].name} (${formatBytes(ocrFiles[0].size)})`;
     const card = document.createElement("div");
     card.className = "ocr-page-card";
     card.innerHTML = `
       <div class="ocr-pdf-thumb-placeholder">
-        <svg style="width: 32px; height: 32px; margin-bottom: 4px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg aria-hidden="true" style="width: 32px; height: 32px; margin-bottom: 4px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
         </svg>
-        <span>PDF Completo</span>
+        <span>Full PDF</span>
       </div>
-      <button type="button" class="ocr-page-remove" onclick="removeOcrFile(0)" title="Quitar archivo">&times;</button>
+      <button type="button" class="ocr-page-remove" data-remove-ocr-idx="0" aria-label="Remove file">&times;</button>
       <div class="ocr-page-name">${escapeHtml(ocrFiles[0].name)}</div>
     `;
     ocrPreviewGrid.appendChild(card);
     return;
   }
 
-  ocrPageCountText.textContent = `${ocrFiles.length} página(s) listas para procesar con OCR`;
+  ocrPageCountText.textContent = `${ocrFiles.length} page(s) queued for OCR processing`;
 
   ocrFiles.forEach((file, idx) => {
     const card = document.createElement("div");
@@ -878,27 +1016,26 @@ function renderOcrPreviews() {
 
     const badge = document.createElement("div");
     badge.className = "ocr-page-badge";
-    badge.textContent = `Pág. ${idx + 1}`;
+    badge.textContent = `Page ${idx + 1}`;
 
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
     removeBtn.className = "ocr-page-remove";
+    removeBtn.dataset.removeOcrIdx = String(idx);
     removeBtn.innerHTML = "&times;";
-    removeBtn.title = "Quitar página";
-    removeBtn.onclick = (e) => {
-      e.stopPropagation();
-      removeOcrFile(idx);
-    };
+    removeBtn.setAttribute("aria-label", `Remove ${file.name}`);
+
+    const objUrl = URL.createObjectURL(file);
+    ocrObjectUrls.push(objUrl);
 
     const img = document.createElement("img");
     img.className = "ocr-page-thumb";
-    img.alt = file.name;
-    img.src = URL.createObjectURL(file);
+    img.alt = `Preview of ${file.name}`;
+    img.src = objUrl;
 
     const name = document.createElement("div");
     name.className = "ocr-page-name";
     name.textContent = file.name;
-    name.title = file.name;
 
     card.appendChild(badge);
     card.appendChild(removeBtn);
@@ -909,22 +1046,9 @@ function renderOcrPreviews() {
   });
 }
 
-function removeOcrFile(idx) {
-  if (idx >= 0 && idx < ocrFiles.length) {
-    ocrFiles.splice(idx, 1);
-    renderOcrPreviews();
-  }
-}
-
 function clearOcrFiles() {
   ocrFiles = [];
   renderOcrPreviews();
-}
-
-function selectOcrLang(card) {
-  document.querySelectorAll("#tab-ocr .option-card").forEach((c) => c.classList.remove("selected"));
-  card.classList.add("selected");
-  selectedOcrLang = card.dataset.ocrlang || "spa";
 }
 
 async function handleOcrScan() {
@@ -932,26 +1056,22 @@ async function handleOcrScan() {
   hideResult();
 
   if (ocrFiles.length === 0) {
-    showError("Por favor selecciona al menos una imagen o un PDF para digitalizar.");
+    showError("Please select at least one image or scanned PDF file to digitize.");
     return;
   }
 
-  const btn = document.getElementById("btnRunOcr");
-  btn.disabled = true;
+  btnRunOcr.disabled = true;
 
   const titleInput = document.getElementById("ocrTitleInput");
   const customTitle = titleInput ? titleInput.value.trim() : "";
-  const chkEnhance = document.getElementById("chkOcrEnhance");
-  const enhanceContrast = chkEnhance ? chkEnhance.checked : false;
-  const chkAutoOrient = document.getElementById("chkOcrAutoOrient");
-  const autoOrient = chkAutoOrient ? chkAutoOrient.checked : true;
+  const enhanceContrast = document.getElementById("chkOcrEnhance").checked;
+  const autoOrient = document.getElementById("chkOcrAutoOrient").checked;
+  const selectedOcrLang = getRadioValue("ocrLang", "eng");
 
-  showProgress("Iniciando digitalización...", 5, "Subiendo páginas al servidor...");
+  showProgress("Starting digitization...", 5, "Uploading pages to OCR server...");
 
   const fd = new FormData();
-  ocrFiles.forEach((file) => {
-    fd.append("files", file);
-  });
+  ocrFiles.forEach((file) => fd.append("files", file));
   fd.append("language", selectedOcrLang);
   fd.append("enhance_contrast", enhanceContrast ? "true" : "false");
   fd.append("auto_orient", autoOrient ? "true" : "false");
@@ -960,19 +1080,16 @@ async function handleOcrScan() {
   }
 
   try {
-    const res = await fetch("/api/ocr-scan", {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch("/api/ocr-scan", { method: "POST", body: fd });
     const data = await res.json();
 
     if (!res.ok) {
-      throw new Error(data.detail || "Error al iniciar la digitalización OCR.");
+      throw new Error(data.detail || "Failed to start OCR digitization.");
     }
 
     pollOcrTask(data.task_id);
   } catch (err) {
-    btn.disabled = false;
+    btnRunOcr.disabled = false;
     hideProgress();
     showError(err.message);
   }
@@ -988,100 +1105,119 @@ function pollOcrTask(taskId) {
 
       if (!res.ok) {
         clearInterval(ocrPollInterval);
-        document.getElementById("btnRunOcr").disabled = false;
+        btnRunOcr.disabled = false;
         hideProgress();
-        showError("Error consultando estado de la digitalización.");
+        showError("Failed to query OCR digitization status.");
         return;
       }
 
-      showProgress("Digitalizando documento...", task.progress, task.message);
+      showProgress("Digitizing document...", task.progress, task.message);
 
       if (task.status === "completed") {
         clearInterval(ocrPollInterval);
-        document.getElementById("btnRunOcr").disabled = false;
+        btnRunOcr.disabled = false;
         hideProgress();
         showOcrResult(task.result);
       } else if (task.status === "failed") {
         clearInterval(ocrPollInterval);
-        document.getElementById("btnRunOcr").disabled = false;
+        btnRunOcr.disabled = false;
         hideProgress();
-        showError(task.message || "La digitalización falló.");
+        showError(task.message || "OCR digitization failed.");
       }
-    } catch (e) {
+    } catch {
       clearInterval(ocrPollInterval);
-      document.getElementById("btnRunOcr").disabled = false;
+      btnRunOcr.disabled = false;
       hideProgress();
-      showError("Error de conexión durante el proceso de OCR.");
+      showError("Connection error during OCR processing.");
     }
   }, 750);
 }
 
 function showOcrResult(res) {
-  document.getElementById("resultHeading").textContent = `¡Digitalización OCR completada! (${res.total_pages} páginas)`;
-  document.getElementById("resOrigSize").textContent = `${res.total_pages} página(s)`;
+  document.getElementById("resOrigSize").textContent = `${res.total_pages} page(s)`;
   document.getElementById("resCompSize").textContent = res.pdf_size_formatted;
   document.getElementById("resSaved").textContent = res.language.toUpperCase();
   document.getElementById("resDuration").textContent = `${res.duration_seconds}s`;
 
-  // Update metric labels for OCR
   const metricLabels = document.querySelectorAll("#metricsGrid .metric-label");
   if (metricLabels.length >= 4) {
-    metricLabels[0].textContent = "Páginas Procesadas";
-    metricLabels[1].textContent = "Tamaño PDF";
-    metricLabels[2].textContent = "Idioma OCR";
-    metricLabels[3].textContent = "Tiempo";
+    metricLabels[0].textContent = "Pages Processed";
+    metricLabels[1].textContent = "PDF Size";
+    metricLabels[2].textContent = "OCR Language";
+    metricLabels[3].textContent = "Elapsed Time";
   }
 
-  // Primary PDF Download Link
   const btnDl = document.getElementById("btnDownloadLink");
-  btnDl.href = `/api/download/${res.filename}`;
-  btnDl.textContent = `Descargar PDF con Texto Seleccionable (${res.pdf_size_formatted})`;
+  btnDl.href = `/api/download/${encodeURIComponent(res.filename)}`;
+  btnDl.textContent = `Download Searchable PDF (${res.pdf_size_formatted})`;
 
-  // TXT Companion Download Link
   const ocrExtraActions = document.getElementById("ocrExtraActions");
-  if (ocrExtraActions) ocrExtraActions.classList.remove("hidden");
+  if (ocrExtraActions) ocrExtraActions.hidden = false;
 
   const btnDlTxt = document.getElementById("btnDownloadTxt");
   if (btnDlTxt && res.text_filename) {
-    btnDlTxt.href = `/api/download/${res.text_filename}`;
-    btnDlTxt.classList.remove("hidden");
+    btnDlTxt.href = `/api/download/${encodeURIComponent(res.text_filename)}`;
+    btnDlTxt.hidden = false;
   }
 
-  const btnCopy = document.getElementById("btnCopyOcrText");
-  if (btnCopy) btnCopy.classList.remove("hidden");
-
-  // Preview Box
   lastExtractedOcrText = res.text_sample || "";
   const previewBox = document.getElementById("ocrTextPreviewBox");
   const previewContent = document.getElementById("ocrTextPreviewContent");
   if (previewBox && previewContent) {
     previewContent.textContent = lastExtractedOcrText;
-    previewBox.classList.remove("hidden");
+    previewBox.hidden = false;
   }
 
-  resultSection.classList.remove("hidden");
-  resultSection.scrollIntoView({ behavior: "smooth" });
+  revealResult(`OCR digitization complete (${res.total_pages} pages)!`);
 }
 
-function copyOcrText() {
-  if (!lastExtractedOcrText) return;
-  navigator.clipboard.writeText(lastExtractedOcrText).then(() => {
-    const btn = document.getElementById("btnCopyOcrText");
-    if (btn) {
-      const origHtml = btn.innerHTML;
-      btn.innerHTML = `
-        <svg style="width: 16px; height: 16px; color: #16a34a;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
-        </svg>
-        ¡Texto Copiado!
-      `;
-      setTimeout(() => {
-        btn.innerHTML = origHtml;
-      }, 2000);
-    }
-  }).catch(() => {
-    showError("No se pudo copiar automáticamente al portapapeles.");
+function legacyCopyText(text) {
+  const field = Object.assign(document.createElement("textarea"), { value: text });
+  field.setAttribute("readonly", "");
+  field.style.cssText = "position:fixed;inset-block-start:0;opacity:0";
+  document.body.append(field);
+  field.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    field.remove();
+  }
+}
+
+function reportCopyStatus(ok) {
+  const tip = document.getElementById("copyStatus");
+  const label = document.getElementById("copyBtnLabel");
+  if (!tip) return;
+
+  clearTimeout(copyFeedbackTimer);
+  let msg = ok ? "Copied!" : "Copy failed";
+  if (msg === lastCopyStatusMessage) msg += "\u00A0";
+  lastCopyStatusMessage = msg;
+
+  if (label) {
+    label.textContent = ok ? "Copied" : "Copy Extracted Text";
+  }
+  tip.textContent = "";
+  requestAnimationFrame(() => {
+    tip.textContent = msg;
   });
+
+  copyFeedbackTimer = setTimeout(() => {
+    if (label) label.textContent = "Copy Extracted Text";
+    tip.textContent = "";
+  }, 2000);
 }
 
-
+async function copyOcrText() {
+  if (!lastExtractedOcrText) return;
+  try {
+    await navigator.clipboard.writeText(lastExtractedOcrText);
+    reportCopyStatus(true);
+  } catch {
+    const fallbackOk = legacyCopyText(lastExtractedOcrText);
+    reportCopyStatus(fallbackOk);
+    if (!fallbackOk) {
+      showError("Could not copy automatically to the clipboard.");
+    }
+  }
+}
