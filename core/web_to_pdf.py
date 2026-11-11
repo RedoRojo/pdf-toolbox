@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -688,6 +688,7 @@ def convert_web_to_pdf(
     custom_author: Optional[str] = None,
     custom_date: Optional[str] = None,
     zotero_mode: str = "standalone",
+    output_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """
     Converts a web URL into a PDF with optional metadata overrides.
@@ -738,7 +739,12 @@ def convert_web_to_pdf(
                 article_info["date"] = custom_date.strip()
 
         output_filename = clean_filename_from_title(article_info["title"], article_info.get("author"))
-        final_pdf_path = PROCESSED_DIR / output_filename
+        if output_path is not None:
+            final_pdf_path = Path(output_path)
+            final_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            output_filename = final_pdf_path.name
+        else:
+            final_pdf_path = PROCESSED_DIR / output_filename
         raw_pdf_path = PROCESSED_DIR / f"raw_{output_filename}"
 
         cmd = [

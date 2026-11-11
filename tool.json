@@ -6,5 +6,6 @@
   "icon": "pdf",
   "command": "./run.sh",
   "port": 8002,
-  "health_path": "/"
+  "health_path": "/",
+  "cli": { "alias": "pdf", "command": "./cli.sh" }
 }

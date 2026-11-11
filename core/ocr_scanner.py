@@ -1,6 +1,7 @@
 """
 OCR scanning and digitization module using Tesseract OCR and PyMuPDF.
 Converts page photographs or scanned PDFs into searchable PDFs with selectable text layers.
+Provides both synchronous `ocr_scan` (used by CLI) and background `start_ocr_job` (used by Web UI).
 """
 
 import os
@@ -11,7 +12,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple, Union
 
 from PIL import Image, ImageEnhance, ImageOps
 import pymupdf
@@ -69,8 +70,6 @@ def _candidate_tessdata_dirs() -> List[Path]:
 def prepare_tessdata_dir(work_dir: Path, lang_code: str, auto_orient: bool) -> Tuple[str, bool]:
     """
     Resolves or assembles a valid tessdata directory containing all requested language packs.
-    Handles systems where bundled languages (e.g., spa) live in ./tessdata while system languages
-    (e.g., eng, osd) live in /usr/share/tessdata or /usr/share/tesseract-ocr/*/tessdata.
     Returns (tessdata_dir_path, has_osd).
     """
     required_langs = [part.strip() for part in lang_code.split("+") if part.strip()]
@@ -79,18 +78,15 @@ def prepare_tessdata_dir(work_dir: Path, lang_code: str, auto_orient: bool) -> T
 
     candidates = _candidate_tessdata_dirs()
 
-    # Check if any single directory satisfies all requested files cleanly
     for candidate in candidates:
         all_langs_present = all((candidate / f"{lang}.traineddata").exists() for lang in required_langs)
         osd_present = (candidate / "osd.traineddata").exists()
         if all_langs_present and (not auto_orient or osd_present):
             return str(candidate), osd_present
 
-    # Otherwise, assemble a runtime staging directory inside work_dir combining available assets
     staged = work_dir / "tessdata"
     staged.mkdir(parents=True, exist_ok=True)
 
-    # Copy/link configs, tessconfigs, and pdf.ttf from candidate dirs if needed
     for helper_name in ("configs", "tessconfigs", "pdf.ttf"):
         dest = staged / helper_name
         if dest.exists():
@@ -160,29 +156,33 @@ def preprocess_image(input_img_path: Path, output_img_path: Path, enhance_contra
         return input_img_path
 
 
-def _run_ocr_task(
-    task_id: str,
+def ocr_scan(
     input_paths: List[str],
-    output_pdf_name: str,
-    output_txt_name: str,
+    output_path: Optional[Union[str, Path]] = None,
+    txt_output_path: Optional[Union[str, Path]] = None,
     language: str = "eng",
     enhance_contrast: bool = False,
     auto_orient: bool = True,
     custom_title: Optional[str] = None,
-) -> None:
-    task = OCR_TASKS.get(task_id)
-    if not task:
-        return
+    write_txt: bool = True,
+    output_pdf_name: Optional[str] = None,
+    output_txt_name: Optional[str] = None,
+    progress_cb: Optional[Callable[[int, str, int, int], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Synchronously performs OCR on one PDF or multiple page images and writes a searchable PDF
+    (and optionally a companion .txt file).
+    """
+    def _notify(pct: int, msg: str, cur_page: int = 0, tot_pages: int = 0) -> None:
+        if progress_cb is not None:
+            progress_cb(pct, msg, cur_page, tot_pages)
 
     t_start = time.time()
-    work_dir = UPLOAD_DIR / f"ocr_tmp_{task_id}"
+    work_dir = UPLOAD_DIR / f"ocr_tmp_{uuid.uuid4().hex}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        task["status"] = "processing"
-        task["progress"] = 5
-        task["message"] = "Analyzing input files..."
-
+        _notify(5, "Analyzing input files...")
         tesseract_bin = _find_tesseract_binary()
 
         lang_code = language.strip() or "eng"
@@ -194,7 +194,9 @@ def _run_ocr_task(
 
         if len(input_paths) == 1 and input_paths[0].lower().endswith(".pdf"):
             pdf_path = Path(input_paths[0])
-            task["message"] = "Extracting PDF pages for digitization..."
+            if not pdf_path.is_file():
+                raise FileNotFoundError(f"PDF file not found: {pdf_path}")
+            _notify(7, "Extracting PDF pages for digitization...")
             doc = pymupdf.open(str(pdf_path))
             try:
                 if doc.needs_pass:
@@ -216,18 +218,15 @@ def _run_ocr_task(
         if total_pages == 0:
             raise ValueError("No valid pages found to process.")
 
-        task["total_pages"] = total_pages
-        task["message"] = f"Starting OCR for {total_pages} page(s)..."
-        task["progress"] = 10
+        _notify(10, f"Starting OCR for {total_pages} page(s)...", 0, total_pages)
 
         page_pdf_files: List[Path] = []
         all_text_lines: List[str] = []
 
         for idx, img_path in enumerate(images_to_process):
             page_num = idx + 1
-            task["current_page"] = page_num
-            task["progress"] = int(10 + (idx / total_pages) * 75)
-            task["message"] = f"Running OCR on page {page_num} of {total_pages} ({lang_code})..."
+            pct = int(10 + (idx / total_pages) * 75)
+            _notify(pct, f"Running OCR on page {page_num} of {total_pages} ({lang_code})...", page_num, total_pages)
 
             proc_img = work_dir / f"proc_{img_path.name}"
             final_img = preprocess_image(img_path, proc_img, enhance_contrast=enhance_contrast)
@@ -286,10 +285,17 @@ def _run_ocr_task(
                 "The OCR engine failed to generate valid pages. Verify image quality and installed languages."
             )
 
-        task["progress"] = 88
-        task["message"] = "Assembling final searchable PDF document..."
+        _notify(88, "Assembling final searchable PDF document...", total_pages, total_pages)
 
-        out_pdf_path = PROCESSED_DIR / output_pdf_name
+        base_name = custom_title.strip() if custom_title else "document"
+        if output_path is not None:
+            out_pdf_path = Path(output_path)
+            out_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            if not output_pdf_name:
+                output_pdf_name = get_unique_filename(f"{base_name}.pdf", prefix="ocr_scan")
+            out_pdf_path = PROCESSED_DIR / output_pdf_name
+
         final_doc = pymupdf.open()
         try:
             for p_pdf in page_pdf_files:
@@ -309,9 +315,21 @@ def _run_ocr_task(
         finally:
             final_doc.close()
 
-        out_txt_path = PROCESSED_DIR / output_txt_name
         full_text = "\n".join(all_text_lines)
-        out_txt_path.write_text(full_text, encoding="utf-8")
+        out_txt_path: Optional[Path] = None
+        final_txt_size = 0
+        if write_txt:
+            if txt_output_path is not None:
+                out_txt_path = Path(txt_output_path)
+            elif output_path is not None:
+                out_txt_path = out_pdf_path.with_suffix(".txt")
+            else:
+                if not output_txt_name:
+                    output_txt_name = get_unique_filename(f"{base_name}.txt", prefix="ocr_scan")
+                out_txt_path = PROCESSED_DIR / output_txt_name
+            out_txt_path.parent.mkdir(parents=True, exist_ok=True)
+            out_txt_path.write_text(full_text, encoding="utf-8")
+            final_txt_size = out_txt_path.stat().st_size
 
         sample_chars = full_text[:1200]
         if len(full_text) > 1200:
@@ -319,15 +337,13 @@ def _run_ocr_task(
 
         duration = round(time.time() - t_start, 2)
         final_pdf_size = out_pdf_path.stat().st_size
-        final_txt_size = out_txt_path.stat().st_size
 
-        task["status"] = "completed"
-        task["progress"] = 100
-        task["message"] = f"Digitization completed! {total_pages} page(s) processed successfully."
-        task["result"] = {
-            "filename": output_pdf_name,
+        _notify(100, f"Digitization completed! {total_pages} page(s) processed successfully.", total_pages, total_pages)
+        return {
+            "filename": out_pdf_path.name,
             "filepath": str(out_pdf_path),
-            "text_filename": output_txt_name,
+            "text_filename": out_txt_path.name if out_txt_path else None,
+            "text_filepath": str(out_txt_path) if out_txt_path else None,
             "total_pages": total_pages,
             "language": lang_code,
             "pdf_size_bytes": final_pdf_size,
@@ -337,14 +353,54 @@ def _run_ocr_task(
             "duration_seconds": duration,
             "text_sample": sample_chars or "(No text detected in the document)",
         }
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
+
+def _run_ocr_task(
+    task_id: str,
+    input_paths: List[str],
+    output_pdf_name: str,
+    output_txt_name: str,
+    language: str = "eng",
+    enhance_contrast: bool = False,
+    auto_orient: bool = True,
+    custom_title: Optional[str] = None,
+) -> None:
+    task = OCR_TASKS.get(task_id)
+    if not task:
+        return
+
+    def _on_progress(pct: int, msg: str, cur_page: int, tot_pages: int) -> None:
+        task["status"] = "processing"
+        task["progress"] = pct
+        task["message"] = msg
+        if tot_pages:
+            task["total_pages"] = tot_pages
+        if cur_page:
+            task["current_page"] = cur_page
+
+    try:
+        result = ocr_scan(
+            input_paths=input_paths,
+            language=language,
+            enhance_contrast=enhance_contrast,
+            auto_orient=auto_orient,
+            custom_title=custom_title,
+            write_txt=True,
+            output_pdf_name=output_pdf_name,
+            output_txt_name=output_txt_name,
+            progress_cb=_on_progress,
+        )
+        task["status"] = "completed"
+        task["progress"] = 100
+        task["message"] = f"Digitization completed! {result['total_pages']} page(s) processed successfully."
+        task["result"] = result
     except Exception as e:
         task["status"] = "failed"
         task["progress"] = 100
         task["error"] = str(e)
         task["message"] = f"OCR digitization error: {str(e)}"
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def start_ocr_job(

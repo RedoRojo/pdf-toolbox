@@ -3,11 +3,26 @@ Core PDF manipulation operations: merge, split, rotate, inspect, and metadata ed
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 import pymupdf
 
 from .utils import format_bytes, get_unique_filename, PROCESSED_DIR
+
+
+def _resolve_out_path(
+    output_path: Optional[Union[str, Path]],
+    output_filename: Optional[str],
+    default_name: str,
+    prefix: str = "",
+) -> Path:
+    if output_path is not None:
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    if not output_filename:
+        output_filename = get_unique_filename(default_name, prefix=prefix)
+    return PROCESSED_DIR / output_filename
 
 
 def parse_page_ranges(range_str: str, max_pages: int) -> List[int]:
@@ -47,7 +62,11 @@ def parse_page_ranges(range_str: str, max_pages: int) -> List[int]:
     return sorted(pages)
 
 
-def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> Dict[str, Any]:
+def merge_pdfs(
+    file_paths: List[str],
+    output_filename: Optional[str] = None,
+    output_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
     """Merges multiple PDF files into a single document in sequence."""
     if not file_paths:
         raise ValueError("No files provided to merge.")
@@ -72,10 +91,7 @@ def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> 
         if len(merged_doc) == 0:
             raise ValueError("Could not load valid pages from the provided files.")
 
-        if not output_filename:
-            output_filename = get_unique_filename("merged.pdf", prefix="merged")
-
-        out_path = PROCESSED_DIR / output_filename
+        out_path = _resolve_out_path(output_path, output_filename, "merged.pdf", prefix="merged")
         merged_doc.save(str(out_path), garbage=4, deflate=True, clean=True)
     finally:
         merged_doc.close()
@@ -83,7 +99,7 @@ def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> 
     size_bytes = out_path.stat().st_size
     return {
         "success": True,
-        "filename": output_filename,
+        "filename": out_path.name,
         "filepath": str(out_path),
         "total_pages": total_source_pages,
         "size_bytes": size_bytes,
@@ -91,7 +107,12 @@ def merge_pdfs(file_paths: List[str], output_filename: Optional[str] = None) -> 
     }
 
 
-def split_pdf(input_path: str, page_ranges: str, output_filename: Optional[str] = None) -> Dict[str, Any]:
+def split_pdf(
+    input_path: str,
+    page_ranges: str,
+    output_filename: Optional[str] = None,
+    output_path: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
     """Extracts selected pages from a PDF document."""
     p = Path(input_path)
     if not p.is_file():
@@ -113,10 +134,7 @@ def split_pdf(input_path: str, page_ranges: str, output_filename: Optional[str] 
             for idx in selected_indices:
                 new_doc.insert_pdf(src_doc, from_page=idx, to_page=idx)
 
-            if not output_filename:
-                output_filename = get_unique_filename(p.name, prefix="split")
-
-            out_path = PROCESSED_DIR / output_filename
+            out_path = _resolve_out_path(output_path, output_filename, p.name, prefix="split")
             new_doc.save(str(out_path), garbage=4, deflate=True, clean=True)
         finally:
             new_doc.close()
@@ -126,7 +144,7 @@ def split_pdf(input_path: str, page_ranges: str, output_filename: Optional[str] 
     size_bytes = out_path.stat().st_size
     return {
         "success": True,
-        "filename": output_filename,
+        "filename": out_path.name,
         "filepath": str(out_path),
         "extracted_pages": len(selected_indices),
         "page_list": [i + 1 for i in selected_indices],
@@ -140,6 +158,7 @@ def rotate_pdf(
     angle: int,
     page_ranges: Optional[str] = None,
     output_filename: Optional[str] = None,
+    output_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Rotates PDF pages by multiples of 90 degrees (90, 180, or 270)."""
     if angle not in (90, 180, 270):
@@ -166,10 +185,7 @@ def rotate_pdf(
             page = doc[idx]
             page.set_rotation((page.rotation + angle) % 360)
 
-        if not output_filename:
-            output_filename = get_unique_filename(p.name, prefix=f"rotated_{angle}")
-
-        out_path = PROCESSED_DIR / output_filename
+        out_path = _resolve_out_path(output_path, output_filename, p.name, prefix=f"rotated_{angle}")
         doc.save(str(out_path), garbage=4, deflate=True)
     finally:
         doc.close()
@@ -177,7 +193,7 @@ def rotate_pdf(
     size_bytes = out_path.stat().st_size
     return {
         "success": True,
-        "filename": output_filename,
+        "filename": out_path.name,
         "filepath": str(out_path),
         "rotated_pages_count": len(indices),
         "angle": angle,
@@ -245,6 +261,7 @@ def update_pdf_metadata(
     subject: Optional[str] = None,
     keywords: Optional[str] = None,
     output_filename: Optional[str] = None,
+    output_path: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """Updates internal PDF metadata fields cleanly."""
     p = Path(input_path)
@@ -269,10 +286,7 @@ def update_pdf_metadata(
 
         doc.set_metadata(meta)
 
-        if not output_filename:
-            output_filename = get_unique_filename(p.name, prefix="meta_edited")
-
-        out_path = PROCESSED_DIR / output_filename
+        out_path = _resolve_out_path(output_path, output_filename, p.name, prefix="meta_edited")
         doc.save(str(out_path), garbage=4, deflate=True)
     finally:
         doc.close()
@@ -280,7 +294,7 @@ def update_pdf_metadata(
     size_bytes = out_path.stat().st_size
     return {
         "success": True,
-        "filename": output_filename,
+        "filename": out_path.name,
         "filepath": str(out_path),
         "title": meta.get("title", ""),
         "author": meta.get("author", ""),

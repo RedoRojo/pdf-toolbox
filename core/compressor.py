@@ -1,5 +1,6 @@
 """
-Asynchronous PDF compression engine using Ghostscript with PyMuPDF fallback.
+PDF compression engine using Ghostscript with PyMuPDF fallback.
+Provides both synchronous `compress_pdf` (used by CLI) and background `start_compression_job` (used by Web UI).
 """
 
 import shutil
@@ -8,7 +9,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, Union
 
 import pymupdf
 
@@ -35,7 +36,7 @@ COMPRESSION_PRESETS = {
     "printer": {
         "name": "High Quality (Print)",
         "description": "Resolution ~300 dpi. Preserves high fidelity for graphics and images.",
-        "pdfsettings": "/printer",
+    "pdfsettings": "/printer",
         "dpi": 300,
     },
 }
@@ -45,6 +46,151 @@ def _find_gs_binary() -> Optional[str]:
     """Resolves the Ghostscript executable if available on the system."""
     candidate = shutil.which("gs") or (GS_BIN if Path(GS_BIN).is_file() else None)
     return candidate
+
+
+def compress_pdf(
+    input_path: str,
+    output_path: Optional[Union[str, Path]] = None,
+    preset: str = "ebook",
+    to_grayscale: bool = False,
+    custom_dpi: Optional[int] = None,
+    output_filename: Optional[str] = None,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Synchronously compresses a PDF file using Ghostscript (with PyMuPDF fallback)
+    and returns compression statistics.
+    """
+    def _notify(pct: int, msg: str) -> None:
+        if progress_cb is not None:
+            progress_cb(pct, msg)
+
+    t_start = time.time()
+    temp_xref: Optional[Path] = None
+    _notify(15, "Starting PDF compression engine...")
+
+    in_p = Path(input_path)
+    if not in_p.is_file():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    if preset not in COMPRESSION_PRESETS:
+        preset = "ebook"
+
+    orig_size = in_p.stat().st_size
+    if output_path is not None:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        if not output_filename:
+            prefix = f"compressed_{preset}"
+            if to_grayscale:
+                prefix += "_gray"
+            output_filename = get_unique_filename(in_p.name, prefix=prefix)
+        out_p = PROCESSED_DIR / output_filename
+
+    gs_preset = COMPRESSION_PRESETS[preset]
+    pdfsettings = gs_preset["pdfsettings"]
+    target_dpi = gs_preset["dpi"]
+    if custom_dpi is not None:
+        target_dpi = max(50, min(600, int(custom_dpi)))
+
+    gs_bin = _find_gs_binary()
+    gs_succeeded = False
+
+    if gs_bin:
+        cmd = [
+            gs_bin,
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.4",
+            f"-dPDFSETTINGS={pdfsettings}",
+            "-dNOPAUSE",
+            "-dQUIET",
+            "-dBATCH",
+            "-dDownsampleColorImages=true",
+            f"-dColorImageResolution={target_dpi}",
+            "-dColorImageDownsampleType=/Bicubic",
+            "-dDownsampleGrayImages=true",
+            f"-dGrayImageResolution={target_dpi}",
+            "-dDownsampleMonoImages=true",
+            "-dMonoImageResolution=150",
+        ]
+
+        if to_grayscale:
+            cmd.extend([
+                "-sColorConversionStrategy=Gray",
+                "-dProcessColorModel=/DeviceGray",
+            ])
+
+        cmd.extend([
+            f"-sOutputFile={str(out_p)}",
+            str(in_p),
+        ])
+
+        _notify(35, "Optimizing images, fonts, and document streams with Ghostscript...")
+
+        try:
+            process = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=300,
+            )
+            gs_succeeded = (
+                process.returncode == 0
+                and out_p.exists()
+                and out_p.stat().st_size > 0
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            gs_succeeded = False
+
+    if not gs_succeeded:
+        _notify(55, "Optimizing with fallback PyMuPDF engine...")
+        doc = pymupdf.open(str(in_p))
+        try:
+            if doc.needs_pass:
+                raise ValueError("This PDF is password-protected and cannot be compressed.")
+            doc.save(str(out_p), garbage=4, deflate=True, clean=True)
+        finally:
+            doc.close()
+
+    _notify(85, "Rebuilding XRef index and compacting...")
+
+    try:
+        temp_xref = out_p.with_suffix(".xref.tmp")
+        doc = pymupdf.open(str(out_p))
+        try:
+            doc.save(str(temp_xref), garbage=4, deflate=True, clean=True)
+        finally:
+            doc.close()
+        if temp_xref.exists() and temp_xref.stat().st_size < out_p.stat().st_size:
+            temp_xref.replace(out_p)
+    except Exception:
+        pass
+    finally:
+        if temp_xref and temp_xref.exists():
+            temp_xref.unlink(missing_ok=True)
+
+    final_size = out_p.stat().st_size
+    saved_bytes = orig_size - final_size
+    saved_pct = round((saved_bytes / orig_size) * 100, 1) if orig_size > 0 else 0.0
+    duration = round(time.time() - t_start, 2)
+
+    _notify(100, "Compression completed successfully!")
+    return {
+        "filename": out_p.name,
+        "filepath": str(out_p),
+        "original_size_bytes": orig_size,
+        "original_size_formatted": format_bytes(orig_size),
+        "compressed_size_bytes": final_size,
+        "compressed_size_formatted": format_bytes(final_size),
+        "saved_bytes": saved_bytes,
+        "saved_bytes_formatted": format_bytes(max(0, saved_bytes)),
+        "saved_percentage": saved_pct,
+        "duration_seconds": duration,
+        "preset": preset,
+        "to_grayscale": to_grayscale,
+    }
 
 
 def _run_compression_task(
@@ -59,129 +205,24 @@ def _run_compression_task(
     if not task:
         return
 
-    t_start = time.time()
-    temp_xref: Optional[Path] = None
-    try:
+    def _on_progress(pct: int, msg: str) -> None:
         task["status"] = "processing"
-        task["progress"] = 15
-        task["message"] = "Starting PDF compression engine..."
+        task["progress"] = pct
+        task["message"] = msg
 
-        in_p = Path(input_path)
-        if not in_p.is_file():
-            raise FileNotFoundError(f"Input file not found: {input_path}")
-
-        orig_size = in_p.stat().st_size
-        out_p = PROCESSED_DIR / output_filename
-
-        gs_preset = COMPRESSION_PRESETS.get(preset, COMPRESSION_PRESETS["ebook"])
-        pdfsettings = gs_preset["pdfsettings"]
-        target_dpi = gs_preset["dpi"]
-        if custom_dpi is not None:
-            target_dpi = max(50, min(600, int(custom_dpi)))
-
-        gs_bin = _find_gs_binary()
-        gs_succeeded = False
-
-        if gs_bin:
-            cmd = [
-                gs_bin,
-                "-sDEVICE=pdfwrite",
-                "-dCompatibilityLevel=1.4",
-                f"-dPDFSETTINGS={pdfsettings}",
-                "-dNOPAUSE",
-                "-dQUIET",
-                "-dBATCH",
-                "-dDownsampleColorImages=true",
-                f"-dColorImageResolution={target_dpi}",
-                "-dColorImageDownsampleType=/Bicubic",
-                "-dDownsampleGrayImages=true",
-                f"-dGrayImageResolution={target_dpi}",
-                "-dDownsampleMonoImages=true",
-                "-dMonoImageResolution=150",
-            ]
-
-            if to_grayscale:
-                cmd.extend([
-                    "-sColorConversionStrategy=Gray",
-                    "-dProcessColorModel=/DeviceGray",
-                ])
-
-            cmd.extend([
-                f"-sOutputFile={str(out_p)}",
-                str(in_p),
-            ])
-
-            task["progress"] = 35
-            task["message"] = "Optimizing images, fonts, and document streams with Ghostscript..."
-
-            try:
-                process = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=300,
-                )
-                gs_succeeded = (
-                    process.returncode == 0
-                    and out_p.exists()
-                    and out_p.stat().st_size > 0
-                )
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                gs_succeeded = False
-
-        if not gs_succeeded:
-            task["progress"] = 55
-            task["message"] = "Optimizing with fallback PyMuPDF engine..."
-            doc = pymupdf.open(str(in_p))
-            try:
-                if doc.needs_pass:
-                    raise ValueError("This PDF is password-protected and cannot be compressed.")
-                doc.save(str(out_p), garbage=4, deflate=True, clean=True)
-            finally:
-                doc.close()
-
-        task["progress"] = 85
-        task["message"] = "Rebuilding XRef index and compacting..."
-
-        # Final XRef optimization pass with PyMuPDF if it reduces file size further
-        try:
-            temp_xref = out_p.with_suffix(".xref.tmp")
-            doc = pymupdf.open(str(out_p))
-            try:
-                doc.save(str(temp_xref), garbage=4, deflate=True, clean=True)
-            finally:
-                doc.close()
-            if temp_xref.exists() and temp_xref.stat().st_size < out_p.stat().st_size:
-                temp_xref.replace(out_p)
-        except Exception:
-            pass
-        finally:
-            if temp_xref and temp_xref.exists():
-                temp_xref.unlink(missing_ok=True)
-
-        final_size = out_p.stat().st_size
-        saved_bytes = orig_size - final_size
-        saved_pct = round((saved_bytes / orig_size) * 100, 1) if orig_size > 0 else 0.0
-        duration = round(time.time() - t_start, 2)
-
+    try:
+        result = compress_pdf(
+            input_path=input_path,
+            preset=preset,
+            to_grayscale=to_grayscale,
+            custom_dpi=custom_dpi,
+            output_filename=output_filename,
+            progress_cb=_on_progress,
+        )
         task["status"] = "completed"
         task["progress"] = 100
         task["message"] = "Compression completed successfully!"
-        task["result"] = {
-            "filename": output_filename,
-            "filepath": str(out_p),
-            "original_size_bytes": orig_size,
-            "original_size_formatted": format_bytes(orig_size),
-            "compressed_size_bytes": final_size,
-            "compressed_size_formatted": format_bytes(final_size),
-            "saved_bytes": saved_bytes,
-            "saved_bytes_formatted": format_bytes(max(0, saved_bytes)),
-            "saved_percentage": saved_pct,
-            "duration_seconds": duration,
-            "preset": preset,
-            "to_grayscale": to_grayscale,
-        }
+        task["result"] = result
     except Exception as e:
         task["status"] = "failed"
         task["progress"] = 100
