@@ -52,7 +52,7 @@ function activateTab(tabBtn, focusTab = false) {
     singleFileSection.hidden = tabName === "merge" || tabName === "webpdf" || tabName === "ocr";
   }
 
-  tabBtn.scrollIntoView({ block: "nearest", inline: "nearest" });
+  tabBtn.scrollIntoView({ block: "nearest", inline: "nearest", container: "nearest" });
   if (focusTab) {
     tabBtn.focus();
   }
@@ -1155,9 +1155,13 @@ function showOcrResult(res) {
   if (ocrExtraActions) ocrExtraActions.hidden = false;
 
   const btnDlTxt = document.getElementById("btnDownloadTxt");
-  if (btnDlTxt && res.text_filename) {
-    btnDlTxt.href = `/api/download/${encodeURIComponent(res.text_filename)}`;
-    btnDlTxt.hidden = false;
+  if (btnDlTxt) {
+    if (res.text_filename) {
+      btnDlTxt.href = `/api/download/${encodeURIComponent(res.text_filename)}`;
+      btnDlTxt.hidden = false;
+    } else {
+      btnDlTxt.hidden = true;
+    }
   }
 
   lastExtractedOcrText = res.text_sample || "";
@@ -1186,7 +1190,6 @@ function legacyCopyText(text) {
 
 function reportCopyStatus(ok) {
   const tip = document.getElementById("copyStatus");
-  const label = document.getElementById("copyBtnLabel");
   if (!tip) return;
 
   clearTimeout(copyFeedbackTimer);
@@ -1194,16 +1197,12 @@ function reportCopyStatus(ok) {
   if (msg === lastCopyStatusMessage) msg += "\u00A0";
   lastCopyStatusMessage = msg;
 
-  if (label) {
-    label.textContent = ok ? "Copied" : "Copy Extracted Text";
-  }
   tip.textContent = "";
   requestAnimationFrame(() => {
     tip.textContent = msg;
   });
 
   copyFeedbackTimer = setTimeout(() => {
-    if (label) label.textContent = "Copy Extracted Text";
     tip.textContent = "";
   }, 2000);
 }

@@ -40,4 +40,4 @@ echo " Python: $PYTHON_CMD"
 echo " Web Interface: http://127.0.0.1:$PORT"
 echo "=========================================================="
 
-"$PYTHON_CMD" -m uvicorn app:app --host 127.0.0.1 --port "$PORT"
+exec "$PYTHON_CMD" -m uvicorn app:app --host 127.0.0.1 --port "$PORT"

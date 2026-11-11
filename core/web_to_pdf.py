@@ -20,7 +20,7 @@ import pymupdf
 import trafilatura
 from bs4 import BeautifulSoup
 
-from .utils import PROCESSED_DIR
+from .utils import PROCESSED_DIR, format_bytes
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,11 +67,22 @@ def detect_document_language(text_or_html: str, soup: Optional[BeautifulSoup] = 
             if len(lang_code) == 2 and lang_code.isalpha():
                 return lang_code
 
-    sample = f" {text_or_html[:4000].lower()} "
-    es_hits = sum(sample.count(w) for w in (" de ", " la ", " el ", " los ", " las ", " que ", " por ", " para "))
-    en_hits = sum(sample.count(w) for w in (" the ", " and ", " of ", " to ", " in ", " that ", " for ", " with "))
+    sample = text_or_html[:4000].lower()
+    words = re.findall(r"[a-zA-Záéíóúüñ]+", sample)
+    es_words = {
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
+        "en", "y", "que", "por", "para", "con", "es", "su", "se", "al",
+    }
+    en_words = {
+        "the", "and", "of", "to", "in", "that", "for", "with", "is", "are",
+        "this", "an", "on", "as", "by", "from",
+    }
+    es_hits = sum(1 for w in words if w in es_words)
+    en_hits = sum(1 for w in words if w in en_words)
 
-    if es_hits > en_hits and es_hits >= 6:
+    if es_hits > en_hits and (
+        es_hits >= 2 or (es_hits >= 1 and bool(re.search(r"[áéíóúñ¿¡]", sample)))
+    ):
         return "es"
     return "en"
 
